@@ -13,9 +13,8 @@ def receive_messages(rfile):
             break
 
         line = line.strip()
-
         if line == "GRID":
-            print("\n[Board]")
+            print("\n[Opponent's Board]")
             while True:
                 board_line = rfile.readline()
                 if not board_line or board_line.strip() == "":
