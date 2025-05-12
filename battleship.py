@@ -9,6 +9,7 @@ Contains core data structures and logic for Battleship, including:
 """
 
 import random
+import threading
 
 BOARD_SIZE = 10
 SHIPS = [
@@ -18,6 +19,8 @@ SHIPS = [
     ("Submarine", 3),
     ("Destroyer", 2)
 ]
+
+
 
 
 class Board:
@@ -68,6 +71,8 @@ class Board:
                         'positions': occupied_positions
                     })
                     placed = True
+
+
 
 
     def place_ships_manually(self, ships=SHIPS):
@@ -291,6 +296,140 @@ def run_single_player_game_locally():
 
         except ValueError as e:
             print("  >> Invalid input:", e)
+
+
+
+
+def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2):
+    """
+    A multiplayer Battleship game for two players where players place ships simultaneously
+    and then alternate turns.
+    """
+    def network_place_ships(board, ships, rfile, wfile, player_name):
+        """
+        Prompt the player to place ships manually over a network connection.
+        Sends prompts to the player and receives their input through the network.
+        """
+        for ship_name, ship_size in ships:
+            while True:
+                send_board(board, wfile)
+                send(f"Placing your {ship_name} (size {ship_size})", wfile)
+                send("Enter starting coordinate (e.g. A1):", wfile)
+                coord_str = recv(rfile).strip()
+                send("Orientation? Enter 'H' (horizontal) or 'V' (vertical):", wfile)
+                orientation_str = recv(rfile).strip().upper()
+
+                try:
+                    row, col = parse_coordinate(coord_str)
+                except ValueError as e:
+                    send(f"[!] Invalid coordinate: {e}", wfile)
+                    continue
+
+                if orientation_str == 'H':
+                    orientation = 0
+                elif orientation_str == 'V':
+                    orientation = 1
+                else:
+                    send("[!] Invalid orientation. Please enter 'H' or 'V'.", wfile)
+                    continue
+
+                if board.can_place_ship(row, col, ship_size, orientation):
+                    occupied_positions = board.do_place_ship(row, col, ship_size, orientation)
+                    board.placed_ships.append({
+                        'name': ship_name,
+                        'positions': occupied_positions
+                    })
+                    break
+                else:
+                    send(f"[!] Cannot place {ship_name} at {coord_str} (orientation={orientation_str}). Try again.")
+        
+        send(f"Player {player_name}, you have finished placing all your ships.", wfile)
+
+    def send(msg, wfile):
+        wfile.write(msg + '\n')
+        wfile.flush()
+
+    def send_board(board, wfile):
+        wfile.write("GRID\n")
+        wfile.write("  " + " ".join(str(i + 1).rjust(2) for i in range(board.size)) + '\n')
+        for r in range(board.size):
+            row_label = chr(ord('A') + r)
+            row_str = " ".join(board.display_grid[r][c] for c in range(board.size))
+            wfile.write(f"{row_label:2} {row_str}\n")
+        wfile.write('\n')
+        wfile.flush()
+
+    def recv(rfile):
+        return rfile.readline().strip()
+
+    # Initialize boards for both players
+    board1 = Board(BOARD_SIZE)
+    board2 = Board(BOARD_SIZE)
+
+    # Use threads to allow both players to place ships simultaneously
+    thread1 = threading.Thread(target=network_place_ships, args=(board1, SHIPS, rfile1, wfile1, '1'))
+    thread2 = threading.Thread(target=network_place_ships, args=(board2, SHIPS, rfile2, wfile2, '2'))
+
+    thread1.start()
+    thread2.start()
+
+    # Wait for both players to finish placing ships
+    thread1.join()
+    thread2.join()
+
+    # Confirm both players are ready to start
+    send("Both players have finished placing ships. The game is starting!", wfile1)
+    send("Both players have finished placing ships. The game is starting!", wfile2)
+
+    # Game loop, alternating turns between Player 1 and Player 2
+    turn = 0
+    while True:
+        current_player = (turn % 2) + 1  # Player 1 or Player 2
+        opponent_player = 2 if current_player == 1 else 1
+        current_board = board1 if current_player == 1 else board2
+        opponent_board = board2 if current_player == 1 else board1
+        current_rfile = rfile1 if current_player == 1 else rfile2
+        current_wfile = wfile1 if current_player == 1 else wfile2
+        opponent_rfile = rfile2 if current_player == 1 else rfile1
+        opponent_wfile = wfile2 if current_player == 1 else wfile1
+
+        # Send current player's board to them and opponent's board to the opponent
+        send_board(current_board, current_wfile)
+        send_board(opponent_board, opponent_wfile)
+
+        # Prompt current player to make a move
+        send(f"Player {current_player}, enter coordinate to fire at (e.g. B5):", current_wfile)
+        guess = recv(current_rfile)
+        if guess.lower() == 'quit':
+            send("Thanks for playing. Goodbye.", current_wfile)
+            return
+
+        try:
+            row, col = parse_coordinate(guess)
+            result, sunk_name = opponent_board.fire_at(row, col)
+
+            if result == 'hit':
+                if sunk_name:
+                    send(f"Player {current_player}, HIT! You sank the {sunk_name}!", current_wfile)
+                else:
+                    send(f"Player {current_player}, HIT!", current_wfile)
+            elif result == 'miss':
+                send(f"Player {current_player}, MISS!", current_wfile)
+            elif result == 'already_shot':
+                send("You've already fired at that location. Try again.", current_wfile)
+
+            # Check if the game is over (if the opponent has sunk all their ships)
+            if opponent_board.all_ships_sunk():
+                send_board(current_board, current_wfile)
+                send_board(opponent_board, opponent_wfile)
+                send(f"Player {current_player} wins! Congratulations! You sank all the opponent's ships.", current_wfile)
+                send(f"Player {current_player} wins! Congratulations! You sank all the opponent's ships.", opponent_wfile)
+                return
+
+            # Switch turns
+            turn += 1
+        except ValueError as e:
+            send(f"Invalid input: {e}", current_wfile)
 
 
 def run_single_player_game_online(rfile, wfile):
