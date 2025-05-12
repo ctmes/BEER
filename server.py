@@ -1,5 +1,6 @@
 import socket
 import threading
+import json
 from battleship import Board, parse_coordinate, SHIPS, BOARD_SIZE
 
 HOST = '127.0.0.1'
@@ -8,32 +9,78 @@ PORT = 5000
 players = []
 lock = threading.Lock()
 
-def send(wfile, msg):
-    wfile.write(msg + '\n')
+def send_json(wfile, obj):
+    wfile.write(json.dumps(obj) + '\n')
     wfile.flush()
 
+def recv_json(rfile):
+    try:
+        return json.loads(rfile.readline())
+    except:
+        return None
+
 def send_board(wfile, board):
-    send(wfile, "GRID")
-    wfile.write("  " + " ".join(str(i + 1).rjust(2) for i in range(board.size)) + '\n')
-    for r in range(board.size):
-        row_label = chr(ord('A') + r)
-        row_str = " ".join(board.display_grid[r][c] for c in range(board.size))
-        wfile.write(f"{row_label:2} {row_str}\n")
-    wfile.write('\n')
-    wfile.flush()
+    send_json(wfile, {
+        "type": "board",
+        "grid": board.display_grid
+    })
+
+def handle_placement(rfile, wfile):
+    board = Board(BOARD_SIZE)
+    for ship_name, ship_size in SHIPS:
+        placed = False
+        while not placed:
+            send_json(wfile, {
+                "type": "prompt",
+                "action": "place",
+                "ship": ship_name,
+                "size": ship_size
+            })
+            request = recv_json(rfile)
+            if not request or request.get("action") != "place":
+                send_json(wfile, {"type": "error", "message": "Expected a ship placement."})
+                continue
+
+            if request.get("ship") != ship_name:
+                send_json(wfile, {"type": "error", "message": f"Expected to place {ship_name}."})
+                continue
+
+            try:
+                row, col = parse_coordinate(request.get("start"))
+                orientation = request.get("orientation").upper()
+                orient_code = 0 if orientation == 'H' else 1 if orientation == 'V' else -1
+                if orient_code not in (0, 1):
+                    raise ValueError("Invalid orientation.")
+
+                if not board.can_place_ship(row, col, ship_size, orient_code):
+                    send_json(wfile, {"type": "error", "message": "Invalid position or overlap. Try again."})
+                    continue
+
+                occupied = board.do_place_ship(row, col, ship_size, orient_code)
+                board.placed_ships.append({
+                    'name': ship_name,
+                    'positions': occupied
+                })
+                send_json(wfile, {"type": "status", "message": f"{ship_name} placed."})
+                placed = True
+
+            except Exception as e:
+                send_json(wfile, {"type": "error", "message": str(e)})
+    return board
 
 def handle_game():
     p1, p2 = players
     (r1, w1, addr1) = p1
     (r2, w2, addr2) = p2
 
-    board1 = Board(BOARD_SIZE)
-    board2 = Board(BOARD_SIZE)
-    board1.place_ships_randomly(SHIPS)
-    board2.place_ships_randomly(SHIPS)
+    send_json(w1, {"type": "status", "message": "Welcome Player 1. Place your ships."})
+    board1 = handle_placement(r1, w1)
 
-    send(w1, "Welcome Player 1! Game starting.")
-    send(w2, "Welcome Player 2! Game starting.")
+    send_json(w2, {"type": "status", "message": "Welcome Player 2. Place your ships."})
+    board2 = handle_placement(r2, w2)
+
+    send_json(w1, {"type": "status", "message": "All ships placed. Game starts now."})
+    send_json(w2, {"type": "status", "message": "All ships placed. Game starts now."})
 
     turn = 0
     while True:
@@ -42,41 +89,46 @@ def handle_game():
 
         rfile, wfile, opponent_board, attacker_name = attacker
 
-        send(wfile, f"Your turn, {attacker_name}.")
+        send_json(wfile, {"type": "status", "message": f"Your turn, {attacker_name}."})
         send_board(wfile, opponent_board)
-        send(wfile, "Enter coordinate to fire at (e.g. B5):")
-        guess = rfile.readline().strip()
-        if not guess:
-            break
-        if guess.lower() == "quit":
-            send(wfile, "You quit. Game over.")
-            send(defender_wfile, f"{attacker_name} quit. You win!")
+        send_json(wfile, {"type": "prompt", "action": "fire"})
+
+        request = recv_json(rfile)
+        if not request or request.get("action") == "quit":
+            send_json(wfile, {"type": "status", "message": "You quit. Game over."})
+            send_json(defender_wfile, {"type": "status", "message": f"{attacker_name} quit. You win!"})
             break
 
-        try:
-            row, col = parse_coordinate(guess)
-            result, sunk = opponent_board.fire_at(row, col)
+        if request.get("action") == "fire":
+            try:
+                row, col = parse_coordinate(request.get("coordinate"))
+                result, sunk = opponent_board.fire_at(row, col)
 
-            if result == "hit":
-                send(wfile, "HIT!" + (f" You sank the {sunk}!" if sunk else ""))
-                send(defender_wfile, f"{attacker_name} hit your ship at {guess}!")
-            elif result == "miss":
-                send(wfile, "MISS!")
-                send(defender_wfile, f"{attacker_name} missed at {guess}.")
-            elif result == "already_shot":
-                send(wfile, "You already fired at that location. Try again.")
+                if result == "hit":
+                    send_json(wfile, {"type": "result", "result": "hit", "sunk": sunk})
+                    send_json(defender_wfile, {
+                        "type": "status",
+                        "message": f"{attacker_name} hit your ship at {request.get('coordinate')}."
+                    })
+                elif result == "miss":
+                    send_json(wfile, {"type": "result", "result": "miss"})
+                    send_json(defender_wfile, {
+                        "type": "status",
+                        "message": f"{attacker_name} missed at {request.get('coordinate')}."
+                    })
+                elif result == "already_shot":
+                    send_json(wfile, {"type": "error", "message": "Already fired at that location."})
+                    continue
+
+                if opponent_board.all_ships_sunk():
+                    send_json(wfile, {"type": "status", "message": "All ships sunk. You win!"})
+                    send_json(defender_wfile, {"type": "status", "message": "All your ships have been sunk. You lose!"})
+                    break
+
+                turn += 1
+            except Exception as e:
+                send_json(wfile, {"type": "error", "message": f"Invalid coordinate: {e}"})
                 continue
-
-            if opponent_board.all_ships_sunk():
-                send(wfile, "All ships sunk. You win!")
-                send(defender_wfile, "All your ships have been sunk. You lose!")
-                break
-
-            turn += 1
-
-        except Exception as e:
-            send(wfile, f"Invalid input: {e}")
-            continue
 
     w1.close()
     w2.close()
@@ -89,7 +141,7 @@ def handle_client(conn, addr):
     with lock:
         if len(players) < 2:
             players.append((rfile, wfile, addr))
-            send(wfile, "Waiting for another player to join...")
+            send_json(wfile, {"type": "status", "message": "Waiting for another player to join..."})
         if len(players) == 2:
             game_thread = threading.Thread(target=handle_game, daemon=True)
             game_thread.start()
