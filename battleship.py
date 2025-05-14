@@ -13,6 +13,7 @@ import threading
 import socket  # For socket.error and network operations
 import time    # For timeout handling
 
+
 BOARD_SIZE = 10
 SHIPS = [
     ("Carrier", 5),
@@ -167,7 +168,7 @@ def parse_coordinate(coord_str):
     return (row, col)
 
 
-def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2):
+def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2, spectators):
     player_files = {
         "Player 1": {"r": rfile1, "w": wfile1},
         "Player 2": {"r": rfile2, "w": wfile2}
@@ -258,7 +259,6 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2):
                 send_msg_to_player(player_tag, f"\n{player_tag}, your current board setup:")
                 send_board_to_player(player_tag, board, show_hidden=True)
                 send_msg_to_player(player_tag, f"Place your {ship_name} (size {ship_size}).")
-
                 send_msg_to_player(player_tag, "Enter start coordinate (e.g., A1) or type 'quit' to exit:")
 
                 try:
@@ -296,6 +296,50 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2):
         send_msg_to_player(player_tag, f"\n{player_tag}, all your ships have been placed:")
         send_board_to_player(player_tag, board, show_hidden=True)
         send_msg_to_player(player_tag, "Waiting for the other player to finish placing ships...")
+
+
+    def broadcast_to_spectators(spectators, message):
+        for spec in spectators[:]:  # Use a copy of the list in case it changes during iteration
+            wfile = spec.get("w")
+            if wfile:
+                send_msg_to_spectator(wfile, message)
+
+    def send_msg_to_spectator(spectator_wfile, message):
+        try:
+            spectator_wfile.write(message + '\n')
+            spectator_wfile.flush()
+        except (socket.error, BrokenPipeError, ConnectionResetError) as e:
+            print(f"[ERROR] Spectator disconnected (send error: {e})")
+            # Handle spectator disconnection if needed (cleanup)
+        pass
+
+    def send_both_boards_to_spectators(spectators):
+        # Get both player boards
+        board_p1 = player_boards["Player 1"]
+        board_p2 = player_boards["Player 2"]
+
+        # Prepare the board display strings
+        p1_grid = board_p1.display_grid
+        p2_grid = board_p2.display_grid
+
+        # Format the boards side-by-side
+        board_message = "PLAYER 1                  PLAYER 2\n"
+        board_message += "-" * (len(board_message) - 1) + "\n" # create a separator line of the right length
+        for r_idx in range(board_p1.size):
+            # Row label for P1 (Player 1) and P2 (Player 2)
+            row_label = chr(ord('A') + r_idx)
+            
+            # Build row for Player 1's board (left)
+            row_p1 = " ".join(p1_grid[r_idx][c_idx] for c_idx in range(board_p1.size))
+            
+            # Build row for Player 2's board (right)
+            row_p2 = " ".join(p2_grid[r_idx][c_idx] for c_idx in range(board_p2.size))
+
+            # Combine them into one row
+            board_message += f"{row_label:2} {row_p1}    |    {row_label:2} {row_p2}\n"
+        for spectator in spectators:
+            send_msg_to_spectator(spectator["w"], board_message)
+
 
     # --- Main Game Logic ---
     game_active = True  # Flag to control main game loop
@@ -351,6 +395,8 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2):
         # If placement successful for both:
         send_msg_to_player("Player 1", "\nBoth players have placed ships. The battle begins!")
         send_msg_to_player("Player 2", "\nBoth players have placed ships. The battle begins!")
+        send_both_boards_to_spectators(spectators)
+        broadcast_to_spectators(spectators, "Game has started!")
 
         # --- Main Game Loop (Turns) ---
         turn_count = 0
@@ -411,16 +457,24 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2):
                 msg_for_opponent = f"{current_player_tag} fired at {guess_input.upper()}: "
 
                 if result == 'hit':
+                    send_both_boards_to_spectators(spectators)
                     if sunk_ship:
                         msg_for_active_player += f"HIT! You sank their {sunk_ship}!"
                         msg_for_opponent += f"HIT! Your {sunk_ship} has been SUNK!"
+                        broadcast_to_spectators(spectators, "{current_player_tag} sunked {opponent_player_tag}'s {sunk_ship}!")
+                        
                     else:
                         msg_for_active_player += "HIT!"
                         msg_for_opponent += "HIT on one of your ships!"
+                        broadcast_to_spectators(spectators, "{current_player_tag} hits {opponent_player_tag}'s ship!")
                 elif result == 'miss':
+                    send_both_boards_to_spectators(spectators)
+                    broadcast_to_spectators(spectators, "{current_player_tag} fired at {opponent_player_tag} and missed.")
                     msg_for_active_player += "MISS."
                     msg_for_opponent += "MISS."
                 elif result == 'already_shot':
+                    send_both_boards_to_spectators(spectators)
+                    broadcast_to_spectators(spectators, "{current_player_tag} fired at an already targeted location.")
                     msg_for_active_player += "ALREADY SHOT there. Your turn is wasted."
                     msg_for_opponent += "They fired at an already targeted location."
 
@@ -430,6 +484,7 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2):
                 # After a shot, show the opponent their updated board
                 send_msg_to_player(opponent_player_tag, f"\n{opponent_player_tag}'s board after {current_player_tag}'s shot:")
                 send_board_to_player(opponent_player_tag, target_board, show_hidden=True)  # Show their own board (can see their ships)
+                
 
                 if target_board.all_ships_sunk():
                     game_active = False  # Mark game as ended
