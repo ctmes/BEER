@@ -298,29 +298,39 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2):
 
             target_board = player_boards[opponent_player_tag] # The board being fired upon
 
+            # Send turn information to both players
             send_msg_to_player(current_player_tag, f"\n--- {current_player_tag}, it's your turn! ---")
             send_msg_to_player(current_player_tag, f"Your view of {opponent_player_tag}'s board:")
             send_board_to_player(current_player_tag, target_board, show_hidden=False) # Show display grid of opponent
 
+            # Inform the opponent they're waiting for the current player's move
             send_msg_to_player(opponent_player_tag, f"\nWaiting for {current_player_tag} to make a move...")
 
+            # Ask current player for their move
             send_msg_to_player(current_player_tag, "Enter coordinate to fire (e.g., A1) or type 'quit' to exit:")
             guess_input = recv_msg_from_player(current_player_tag)
 
+            # Check if the player wants to quit
             if guess_input.lower() == 'quit':
                 game_active = False # Mark game as ended
                 quitting_player = current_player_tag
                 other_player = opponent_player_tag
                 print(f"[GAME INFO] {quitting_player} has chosen to quit.")
+
+                # Fix: Send a clearer message to both players
                 try:
-                    send_msg_to_player(quitting_player, "You have quit the game. Game over.")
+                    send_msg_to_player(quitting_player, f"You have chosen to quit the game. Game over.")
                 except PlayerDisconnectedException: # Quitter already gone
                     print(f"[GAME INFO] {quitting_player} (who was quitting) already disconnected.")
+
                 try:
-                    send_msg_to_player(other_player, f"{quitting_player} has quit the game. Game over.")
+                    # Fix: Send a clearer message to the other player
+                    send_msg_to_player(other_player, f"\n{quitting_player} has chosen to quit the game. Game over.")
                 except PlayerDisconnectedException: # Opponent already gone
                     print(f"[GAME INFO] Opponent {other_player} was already disconnected when {quitting_player} quit.")
-                break # Exit the 'while game_active:' loop immediately
+
+                # Exit the game loop
+                break
 
             try:
                 row, col = parse_coordinate(guess_input)
@@ -381,8 +391,8 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2):
 
         if remaining_player:
             try:
-                # Use a more generic message if one player disconnected during the other's action
-                notification_msg = f"The game has ended because your opponent ({disconnected_msg_detail.split(' (')[0]}) disconnected or quit."
+                # Fix: Provide a clearer message to the remaining player
+                notification_msg = f"\nThe game has ended because your opponent disconnected or quit."
                 send_msg_to_player(remaining_player, notification_msg)
             except PlayerDisconnectedException:
                 print(f"[GAME INFO] {remaining_player} also disconnected or unreachable while notifying of opponent's disconnect.")
@@ -408,14 +418,12 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2):
         if e_critical_main: # A critical, unexpected error occurred
             final_goodbye_msg = "The game session has ended due to a server error. Goodbye."
         elif e_main_handler: # A player disconnected (PlayerDisconnectedException was caught)
-            final_goodbye_msg = f"The game session has ended due to a disconnection ({str(e_main_handler).split(' (')[0]}). Goodbye."
-        elif not game_active : # Game ended by win/loss or explicit "quit" command
-            # Specific messages for win/loss/quit were already sent.
-            # So, a simple "Goodbye" or no additional message might be best.
-            # If we set final_goodbye_msg = None, no generic message is sent.
-            final_goodbye_msg = None # Suppress generic goodbye if specific end already sent.
+            final_goodbye_msg = f"The game session has ended due to a disconnection. Goodbye."
+        elif not game_active: # Game ended by win/loss or explicit "quit" command
+            # Fix: Include a goodbye message even if the game ended normally
+            final_goodbye_msg = "The game has ended. Thank you for playing Battleship!"
 
-
+        # Send the final goodbye message to both players
         for p_tag_final_cleanup in ["Player 1", "Player 2"]:
             wfile_cleanup = player_files[p_tag_final_cleanup]["w"]
             rfile_cleanup = player_files[p_tag_final_cleanup]["r"]
@@ -435,6 +443,7 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2):
                 try: rfile_cleanup.close()
                 except: pass
         print("[INFO] Game resources cleaned up for this instance.")
+        # print("[INFO] If you would like, reconnect to the server to keep playing!")
 
 
 def run_single_player_game_locally(): # For local testing, unchanged
