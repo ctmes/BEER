@@ -5,11 +5,14 @@ Contains core data structures and logic for Battleship, including:
  - Board class for storing ship positions, hits, misses
  - Utility function parse_coordinate for translating e.g. 'B5' -> (row, col)
  - A test harness run_single_player_game() to demonstrate the logic in a local, single-player mode
-
 """
 
 import random
 import threading
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 BOARD_SIZE = 10
 SHIPS = [
@@ -19,9 +22,6 @@ SHIPS = [
     ("Submarine", 3),
     ("Destroyer", 2)
 ]
-
-
-
 
 class Board:
     """
@@ -35,35 +35,20 @@ class Board:
              'positions': set of (r, c),
           }
         used to determine when a specific ship has been fully sunk.
-
-    In a full 2-player networked game:
-      - Each player has their own Board instance.
-      - When a player fires at their opponent, the server calls
-        opponent_board.fire_at(...) and sends back the result.
     """
-
     def __init__(self, size=BOARD_SIZE):
         self.size = size
-        # '.' for empty water
         self.hidden_grid = [['.' for _ in range(size)] for _ in range(size)]
-        # display_grid is what the player or an observer sees (no 'S')
         self.display_grid = [['.' for _ in range(size)] for _ in range(size)]
-        self.placed_ships = []  # e.g. [{'name': 'Destroyer', 'positions': {(r, c), ...}}, ...]
+        self.placed_ships = []
 
     def place_ships_randomly(self, ships=SHIPS):
-        """
-        Randomly place each ship in 'ships' on the hidden_grid, storing positions for each ship.
-        In a networked version, you might parse explicit placements from a player's commands
-        (e.g. "PLACE A1 H BATTLESHIP") or prompt the user for board coordinates and placement orientations; 
-        the self.place_ships_manually() can be used as a guide.
-        """
         for ship_name, ship_size in ships:
             placed = False
             while not placed:
-                orientation = random.randint(0, 1)  # 0 => horizontal, 1 => vertical
+                orientation = random.randint(0, 1)
                 row = random.randint(0, self.size - 1)
                 col = random.randint(0, self.size - 1)
-
                 if self.can_place_ship(row, col, ship_size, orientation):
                     occupied_positions = self.do_place_ship(row, col, ship_size, orientation)
                     self.placed_ships.append({
@@ -72,14 +57,7 @@ class Board:
                     })
                     placed = True
 
-
-
-
     def place_ships_manually(self, ships=SHIPS):
-        """
-        Prompt the user for each ship's starting coordinate and orientation (H or V).
-        Validates the placement; if invalid, re-prompts.
-        """
         print("\nPlease place your ships manually on the board.")
         for ship_name, ship_size in ships:
             while True:
@@ -87,14 +65,11 @@ class Board:
                 print(f"\nPlacing your {ship_name} (size {ship_size}).")
                 coord_str = input("  Enter starting coordinate (e.g. A1): ").strip()
                 orientation_str = input("  Orientation? Enter 'H' (horizontal) or 'V' (vertical): ").strip().upper()
-
                 try:
                     row, col = parse_coordinate(coord_str)
                 except ValueError as e:
                     print(f"  [!] Invalid coordinate: {e}")
                     continue
-
-                # Convert orientation_str to 0 (horizontal) or 1 (vertical)
                 if orientation_str == 'H':
                     orientation = 0
                 elif orientation_str == 'V':
@@ -102,8 +77,6 @@ class Board:
                 else:
                     print("  [!] Invalid orientation. Please enter 'H' or 'V'.")
                     continue
-
-                # Check if we can place the ship
                 if self.can_place_ship(row, col, ship_size, orientation):
                     occupied_positions = self.do_place_ship(row, col, ship_size, orientation)
                     self.placed_ships.append({
@@ -114,20 +87,14 @@ class Board:
                 else:
                     print(f"  [!] Cannot place {ship_name} at {coord_str} (orientation={orientation_str}). Try again.")
 
-
     def can_place_ship(self, row, col, ship_size, orientation):
-        """
-        Check if we can place a ship of length 'ship_size' at (row, col)
-        with the given orientation (0 => horizontal, 1 => vertical).
-        Returns True if the space is free, False otherwise.
-        """
-        if orientation == 0:  # Horizontal
+        if orientation == 0:
             if col + ship_size > self.size:
                 return False
             for c in range(col, col + ship_size):
                 if self.hidden_grid[row][c] != '.':
                     return False
-        else:  # Vertical
+        else:
             if row + ship_size > self.size:
                 return False
             for r in range(row, row + ship_size):
@@ -136,59 +103,37 @@ class Board:
         return True
 
     def do_place_ship(self, row, col, ship_size, orientation):
-        """
-        Place the ship on hidden_grid by marking 'S', and return the set of occupied positions.
-        """
         occupied = set()
-        if orientation == 0:  # Horizontal
+        if orientation == 0:
             for c in range(col, col + ship_size):
                 self.hidden_grid[row][c] = 'S'
                 occupied.add((row, c))
-        else:  # Vertical
+        else:
             for r in range(row, row + ship_size):
                 self.hidden_grid[r][col] = 'S'
-                occupied.add((r, col))
+                occupied.add((r, c))
         return occupied
 
     def fire_at(self, row, col):
-        """
-        Fire at (row, col). Return a tuple (result, sunk_ship_name).
-        Possible outcomes:
-          - ('hit', None)          if it's a hit but not sunk
-          - ('hit', <ship_name>)   if that shot causes the entire ship to sink
-          - ('miss', None)         if no ship was there
-          - ('already_shot', None) if that cell was already revealed as 'X' or 'o'
-
-        The server can use this result to inform the firing player.
-        """
         cell = self.hidden_grid[row][col]
         if cell == 'S':
-            # Mark a hit
             self.hidden_grid[row][col] = 'X'
             self.display_grid[row][col] = 'X'
-            # Check if that hit sank a ship
             sunk_ship_name = self._mark_hit_and_check_sunk(row, col)
             if sunk_ship_name:
-                return ('hit', sunk_ship_name)  # A ship has just been sunk
+                return ('hit', sunk_ship_name)
             else:
                 return ('hit', None)
         elif cell == '.':
-            # Mark a miss
             self.hidden_grid[row][col] = 'o'
             self.display_grid[row][col] = 'o'
             return ('miss', None)
         elif cell == 'X' or cell == 'o':
             return ('already_shot', None)
         else:
-            # In principle, this branch shouldn't happen if 'S', '.', 'X', 'o' are all possibilities
             return ('already_shot', None)
 
     def _mark_hit_and_check_sunk(self, row, col):
-        """
-        Remove (row, col) from the relevant ship's positions.
-        If that ship's positions become empty, return the ship name (it's sunk).
-        Otherwise return None.
-        """
         for ship in self.placed_ships:
             if (row, col) in ship['positions']:
                 ship['positions'].remove((row, col))
@@ -198,74 +143,34 @@ class Board:
         return None
 
     def all_ships_sunk(self):
-        """
-        Check if all ships are sunk (i.e. every ship's positions are empty).
-        """
         for ship in self.placed_ships:
             if len(ship['positions']) > 0:
                 return False
         return True
 
     def print_display_grid(self, show_hidden_board=False):
-        """
-        Print the board as a 2D grid.
-        
-        If show_hidden_board is False (default), it prints the 'attacker' or 'observer' view:
-        - '.' for unknown cells,
-        - 'X' for known hits,
-        - 'o' for known misses.
-        
-        If show_hidden_board is True, it prints the entire hidden grid:
-        - 'S' for ships,
-        - 'X' for hits,
-        - 'o' for misses,
-        - '.' for empty water.
-        """
-        # Decide which grid to print
         grid_to_print = self.hidden_grid if show_hidden_board else self.display_grid
-
-        # Column headers (1 .. N)
         print("  " + "".join(str(i + 1).rjust(2) for i in range(self.size)))
-        # Each row labeled with A, B, C, ...
         for r in range(self.size):
             row_label = chr(ord('A') + r)
             row_str = " ".join(grid_to_print[r][c] for c in range(self.size))
             print(f"{row_label:2} {row_str}")
 
-
 def parse_coordinate(coord_str):
-    """
-    Convert something like 'B5' into zero-based (row, col).
-    Example: 'A1' => (0, 0), 'C10' => (2, 9)
-    HINT: you might want to add additional input validation here...
-    """
     coord_str = coord_str.strip().upper()
     row_letter = coord_str[0]
     col_digits = coord_str[1:]
-
     row = ord(row_letter) - ord('A')
-    col = int(col_digits) - 1  # zero-based
-
+    col = int(col_digits) - 1
     return (row, col)
 
-
 def run_single_player_game_locally():
-    """
-    A test harness for local single-player mode, demonstrating two approaches:
-     1) place_ships_manually()
-     2) place_ships_randomly()
-
-    Then the player tries to sink them by firing coordinates.
-    """
     board = Board(BOARD_SIZE)
-
-    # Ask user how they'd like to place ships
     choice = input("Place ships manually (M) or randomly (R)? [M/R]: ").strip().upper()
     if choice == 'M':
         board.place_ships_manually(SHIPS)
     else:
         board.place_ships_randomly(SHIPS)
-
     print("\nNow try to sink all the ships!")
     moves = 0
     while True:
@@ -274,12 +179,10 @@ def run_single_player_game_locally():
         if guess.lower() == 'quit':
             print("Thanks for playing. Exiting...")
             return
-
         try:
             row, col = parse_coordinate(guess)
             result, sunk_name = board.fire_at(row, col)
             moves += 1
-
             if result == 'hit':
                 if sunk_name:
                     print(f"  >> HIT! You sank the {sunk_name}!")
@@ -293,121 +196,168 @@ def run_single_player_game_locally():
                 print("  >> MISS!")
             elif result == 'already_shot':
                 print("  >> You've already fired at that location. Try again.")
-
         except ValueError as e:
             print("  >> Invalid input:", e)
 
-
-
-
-def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2):
+def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2, conn1, conn2):
     """
     A multiplayer Battleship game for two players where players place ships simultaneously
-    and then alternate turns.
+    and then alternate turns. Handles client disconnections by notifying the other player
+    and resetting the game state.
     """
-    def network_place_ships(board, ships, rfile, wfile, player_name):
-        """
-        Prompt the player to place ships manually over a network connection.
-        Sends prompts to the player and receives their input through the network.
-        """
+    from server import players, lock, clients
+    logging.debug("Starting run_multiplayer_game for players with connections %s, %s", conn1, conn2)
+
+    def network_place_ships(board, ships, rfile, wfile, player_name, conn):
+        logging.debug("Starting ship placement for Player %s", player_name)
         for ship_name, ship_size in ships:
             while True:
-                send_board(board, wfile)
-                send(f"Placing your {ship_name} (size {ship_size})", wfile)
-                send("Enter starting coordinate (e.g. A1):", wfile)
-                coord_str = recv(rfile).strip()
-                send("Orientation? Enter 'H' (horizontal) or 'V' (vertical):", wfile)
-                orientation_str = recv(rfile).strip().upper()
-
                 try:
-                    row, col = parse_coordinate(coord_str)
-                except ValueError as e:
-                    send(f"[!] Invalid coordinate: {e}", wfile)
-                    continue
-
-                if orientation_str == 'H':
-                    orientation = 0
-                elif orientation_str == 'V':
-                    orientation = 1
-                else:
-                    send("[!] Invalid orientation. Please enter 'H' or 'V'.", wfile)
-                    continue
-
-                if board.can_place_ship(row, col, ship_size, orientation):
-                    occupied_positions = board.do_place_ship(row, col, ship_size, orientation)
-                    board.placed_ships.append({
-                        'name': ship_name,
-                        'positions': occupied_positions
-                    })
-                    break
-                else:
-                    send(f"[!] Cannot place {ship_name} at {coord_str} (orientation={orientation_str}). Try again.")
-        
+                    send_board(board, wfile)
+                    send(f"Placing your {ship_name} (size {ship_size})", wfile)
+                    send("Enter starting coordinate (e.g. A1):", wfile)
+                    coord_str = recv(rfile)
+                    logging.debug("Player %s sent coordinate: %s", player_name, coord_str)
+                    send("Orientation? Enter 'H' (horizontal) or 'V' (vertical):", wfile)
+                    orientation_str = recv(rfile)
+                    logging.debug("Player %s sent orientation: %s", player_name, orientation_str)
+                    orientation_str = orientation_str.upper()
+                    try:
+                        row, col = parse_coordinate(coord_str)
+                    except ValueError as e:
+                        send(f"[!] Invalid coordinate: {e}", wfile)
+                        continue
+                    if orientation_str == 'H':
+                        orientation = 0
+                    elif orientation_str == 'V':
+                        orientation = 1
+                    else:
+                        send("[!] Invalid orientation. Please enter 'H' or 'V'.", wfile)
+                        continue
+                    if board.can_place_ship(row, col, ship_size, orientation):
+                        occupied_positions = board.do_place_ship(row, col, ship_size, orientation)
+                        board.placed_ships.append({
+                            'name': ship_name,
+                            'positions': occupied_positions
+                        })
+                        break
+                    else:
+                        send(f"[!] Cannot place {ship_name} at {coord_str} (orientation={orientation_str}). Try again.")
+                except (ConnectionError, BrokenPipeError, OSError) as e:
+                    logging.error("Connection error for Player %s: %s", player_name, e)
+                    handle_disconnect(player_name, conn)
+                    raise
         send(f"Player {player_name}, you have finished placing all your ships.", wfile)
+        logging.debug("Player %s completed ship placement", player_name)
 
     def send(msg, wfile):
-        wfile.write(msg + '\n')
-        wfile.flush()
+        try:
+            wfile.write(msg + '\n')
+            wfile.flush()
+        except (BrokenPipeError, OSError):
+            raise ConnectionError("Client disconnected")
 
     def send_board(board, wfile):
-        wfile.write("GRID\n")
-        wfile.write("  " + " ".join(str(i + 1).rjust(2) for i in range(board.size)) + '\n')
-        for r in range(board.size):
-            row_label = chr(ord('A') + r)
-            row_str = " ".join(board.display_grid[r][c] for c in range(board.size))
-            wfile.write(f"{row_label:2} {row_str}\n")
-        wfile.write('\n')
-        wfile.flush()
+        try:
+            wfile.write("GRID\n")
+            wfile.write("  " + " ".join(str(i + 1).rjust(2) for i in range(board.size)) + '\n')
+            for r in range(board.size):
+                row_label = chr(ord('A') + r)
+                row_str = " ".join(board.display_grid[r][c] for c in range(board.size))
+                wfile.write(f"{row_label:2} {row_str}\n")
+            wfile.write('\n')
+            wfile.flush()
+        except (BrokenPipeError, OSError):
+            raise ConnectionError("Client disconnected")
 
     def recv(rfile):
-        return rfile.readline().strip()
+        line = rfile.readline().strip()
+        if not line:
+            raise ConnectionError("Client disconnected")
+        return line
 
-    # Initialize boards for both players
-    board1 = Board(BOARD_SIZE)
-    board2 = Board(BOARD_SIZE)
+    def handle_disconnect(player_name, conn):
+        """Notify the other player and reset game state."""
+        logging.debug("Handling disconnection for Player %s", player_name)
+        opponent_conn = conn2 if conn == conn1 else conn1
+        opponent_wfile = wfile2 if conn == conn1 else wfile1
+        try:
+            send(f"[INFO] Player {player_name} disconnected. Game aborted.", opponent_wfile)
+            send("Waiting for another player to join...", opponent_wfile)
+        except:
+            logging.warning("Failed to notify opponent of Player %s disconnection", player_name)
+        with lock:
+            players[:] = [(r, w, a, c) for r, w, a, c in players if c != conn]
+            if opponent_conn in clients:
+                players.append((opponent_rfile, opponent_wfile, opponent_addr, opponent_conn))
+        try:
+            conn.close()
+        except:
+            pass
+        logging.debug("Player %s disconnection handled", player_name)
 
-    # Use threads to allow both players to place ships simultaneously
-    thread1 = threading.Thread(target=network_place_ships, args=(board1, SHIPS, rfile1, wfile1, '1'))
-    thread2 = threading.Thread(target=network_place_ships, args=(board2, SHIPS, rfile2, wfile2, '2'))
+    # Initialize boards and player info
+    try:
+        board1 = Board(BOARD_SIZE)
+        board2 = Board(BOARD_SIZE)
+        opponent_rfile = rfile2
+        opponent_wfile = wfile2
+        opponent_conn = conn2
+        opponent_addr = players[1][2] if conn1 == players[0][3] else players[0][2]
+        logging.debug("Initialized boards and opponent info")
+    except Exception as e:
+        logging.error("Error initializing game: %s", e)
+        handle_disconnect('1', conn1)
+        handle_disconnect('2', conn2)
+        return
 
-    thread1.start()
-    thread2.start()
+    # Place ships with disconnection handling
+    try:
+        thread1 = threading.Thread(target=network_place_ships, args=(board1, SHIPS, rfile1, wfile1, '1', conn1))
+        thread2 = threading.Thread(target=network_place_ships, args=(board2, SHIPS, rfile2, wfile2, '2', conn2))
+        logging.debug("Starting ship placement threads")
+        thread1.start()
+        thread2.start()
+        thread1.join()
+        thread2.join()
+        logging.debug("Ship placement completed")
+    except (ConnectionError, BrokenPipeError, OSError):
+        logging.debug("Game aborted due to disconnection during ship placement")
+        return
 
-    # Wait for both players to finish placing ships
-    thread1.join()
-    thread2.join()
+    # Confirm both players are ready
+    try:
+        send("Both players have finished placing ships. The game is starting!", wfile1)
+        send("Both players have finished placing ships. The game is starting!", wfile2)
+        logging.debug("Sent game start confirmation to both players")
+    except (ConnectionError, BrokenPipeError, OSError):
+        logging.debug("Game aborted due to disconnection at game start")
+        handle_disconnect('1' if conn1 else '2', conn1 if conn1 else conn2)
+        return
 
-    # Confirm both players are ready to start
-    send("Both players have finished placing ships. The game is starting!", wfile1)
-    send("Both players have finished placing ships. The game is starting!", wfile2)
-
-    # Game loop, alternating turns between Player 1 and Player 2
+    # Game loop
     turn = 0
     while True:
-        current_player = (turn % 2) + 1  # Player 1 or Player 2
+        current_player = (turn % 2) + 1
         opponent_player = 2 if current_player == 1 else 1
         current_board = board1 if current_player == 1 else board2
         opponent_board = board2 if current_player == 1 else board1
         current_rfile = rfile1 if current_player == 1 else rfile2
         current_wfile = wfile1 if current_player == 1 else wfile2
-        opponent_rfile = rfile2 if current_player == 1 else rfile1
-        opponent_wfile = wfile2 if current_player == 1 else wfile1
-
-        # Send current player's board to them and opponent's board to the opponent
-        send_board(current_board, current_wfile)
-        send_board(opponent_board, opponent_wfile)
-
-        # Prompt current player to make a move
-        send(f"Player {current_player}, enter coordinate to fire at (e.g. B5):", current_wfile)
-        guess = recv(current_rfile)
-        if guess.lower() == 'quit':
-            send("Thanks for playing. Goodbye.", current_wfile)
-            return
+        current_conn = conn1 if current_player == 1 else conn2
 
         try:
+            send_board(current_board, current_wfile)
+            send_board(opponent_board, opponent_wfile)
+            send(f"Player {current_player}, enter coordinate to fire at (e.g. B5):", current_wfile)
+            guess = recv(current_rfile)
+            logging.debug("Player %s sent guess: %s", current_player, guess)
+            if guess.lower() == 'quit':
+                send("Thanks for playing. Goodbye.", current_wfile)
+                handle_disconnect(str(current_player), current_conn)
+                return
             row, col = parse_coordinate(guess)
             result, sunk_name = opponent_board.fire_at(row, col)
-
             if result == 'hit':
                 if sunk_name:
                     send(f"Player {current_player}, HIT! You sank the {sunk_name}!", current_wfile)
@@ -417,37 +367,26 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2):
                 send(f"Player {current_player}, MISS!", current_wfile)
             elif result == 'already_shot':
                 send("You've already fired at that location. Try again.", current_wfile)
-
-            # Check if the game is over (if the opponent has sunk all their ships)
             if opponent_board.all_ships_sunk():
                 send_board(current_board, current_wfile)
                 send_board(opponent_board, opponent_wfile)
                 send(f"Player {current_player} wins! Congratulations! You sank all the opponent's ships.", current_wfile)
                 send(f"Player {current_player} wins! Congratulations! You sank all the opponent's ships.", opponent_wfile)
+                logging.debug("Player %s won the game", current_player)
                 return
-
-            # Switch turns
             turn += 1
-        except ValueError as e:
-            send(f"Invalid input: {e}", current_wfile)
-
+        except (ConnectionError, BrokenPipeError, OSError, ValueError) as e:
+            logging.error("Error in game loop for Player %s: %s", current_player, e)
+            if isinstance(e, ValueError):
+                send(f"Invalid input: {e}", current_wfile)
+            else:
+                handle_disconnect(str(current_player), current_conn)
+            return
 
 def run_single_player_game_online(rfile, wfile):
-    """
-    A test harness for running the single-player game with I/O redirected to socket file objects.
-    Expects:
-      - rfile: file-like object to .readline() from client
-      - wfile: file-like object to .write() back to client
-    
-    #####
-    NOTE: This function is (intentionally) currently somewhat "broken", which will be evident if you try and play the game via server/client.
-    You can use this as a starting point, or write your own.
-    #####
-    """
     def send(msg):
         wfile.write(msg + '\n')
         wfile.flush()
-
     def send_board(board):
         wfile.write("GRID\n")
         wfile.write("  " + " ".join(str(i + 1).rjust(2) for i in range(board.size)) + '\n')
@@ -457,15 +396,11 @@ def run_single_player_game_online(rfile, wfile):
             wfile.write(f"{row_label:2} {row_str}\n")
         wfile.write('\n')
         wfile.flush()
-
     def recv():
         return rfile.readline().strip()
-
     board = Board(BOARD_SIZE)
     board.place_ships_randomly(SHIPS)
-
     send("Welcome to Online Single-Player Battleship! Try to sink all the ships. Type 'quit' to exit.")
-
     moves = 0
     while True:
         send_board(board)
@@ -474,12 +409,10 @@ def run_single_player_game_online(rfile, wfile):
         if guess.lower() == 'quit':
             send("Thanks for playing. Goodbye.")
             return
-
         try:
             row, col = parse_coordinate(guess)
             result, sunk_name = board.fire_at(row, col)
             moves += 1
-
             if result == 'hit':
                 if sunk_name:
                     send(f"HIT! You sank the {sunk_name}!")
@@ -497,5 +430,4 @@ def run_single_player_game_online(rfile, wfile):
             send(f"Invalid input: {e}")
 
 if __name__ == "__main__":
-    # Optional: run this file as a script to test single-player mode
     run_single_player_game_locally()
