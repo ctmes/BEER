@@ -461,20 +461,20 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2, spectators):
                     if sunk_ship:
                         msg_for_active_player += f"HIT! You sank their {sunk_ship}!"
                         msg_for_opponent += f"HIT! Your {sunk_ship} has been SUNK!"
-                        broadcast_to_spectators(spectators, "{current_player_tag} sunked {opponent_player_tag}'s {sunk_ship}!")
+                        broadcast_to_spectators(spectators, f"{current_player_tag} sunked {opponent_player_tag}'s {sunk_ship}!")
                         
                     else:
                         msg_for_active_player += "HIT!"
                         msg_for_opponent += "HIT on one of your ships!"
-                        broadcast_to_spectators(spectators, "{current_player_tag} hits {opponent_player_tag}'s ship!")
+                        broadcast_to_spectators(spectators, f"{current_player_tag} hits {opponent_player_tag}'s ship!")
                 elif result == 'miss':
                     send_both_boards_to_spectators(spectators)
-                    broadcast_to_spectators(spectators, "{current_player_tag} fired at {opponent_player_tag} and missed.")
+                    broadcast_to_spectators(spectators, f"{current_player_tag} fired at {opponent_player_tag} and missed.")
                     msg_for_active_player += "MISS."
                     msg_for_opponent += "MISS."
                 elif result == 'already_shot':
                     send_both_boards_to_spectators(spectators)
-                    broadcast_to_spectators(spectators, "{current_player_tag} fired at an already targeted location.")
+                    broadcast_to_spectators(spectators, f"{current_player_tag} fired at an already targeted location.")
                     msg_for_active_player += "ALREADY SHOT there. Your turn is wasted."
                     msg_for_opponent += "They fired at an already targeted location."
 
