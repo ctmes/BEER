@@ -5,13 +5,15 @@ Contains core data structures and logic for Battleship, including:
  - Board class for storing ship positions, hits, misses
  - Utility function parse_coordinate for translating e.g. 'B5' -> (row, col)
  - A test harness run_single_player_game() to demonstrate the logic in a local, single-player mode
- - run_multiplayer_game() for networked play, now with disconnection handling and timeout detection.
+ - run_multiplayer_game() for networked play, now with disconnection handling and timeout detection,
+   and integration with server-side input handling for commands/chat.
 """
 
 import random
 import threading
 import socket  # For socket.error and network operations
 import time    # For timeout handling
+import queue   # For inter-thread communication
 
 
 BOARD_SIZE = 10
@@ -85,7 +87,7 @@ class Board:
                     self.placed_ships.append({'name': ship_name, 'positions': occupied_positions.copy()})
                     break
                 else:
-                    print(f"  [!] Cannot place {ship_name} at {coord_str} (orientation={orientation_str}). Try again.")
+                    print(f"  [!] Cannot place {ship_name} at {coord_str} (orientation={orientation_str}). It overlaps existing ships or is out of bounds. Try again.")
 
     def can_place_ship(self, row, col, ship_size, orientation):
         if orientation == 0:  # Horizontal
@@ -112,9 +114,6 @@ class Board:
 
     def fire_at(self, row, col):
         # parse_coordinate should ensure row/col are valid before this is called.
-        # if not (0 <= row < self.size and 0 <= col < self.size):
-        #     raise ValueError("Coordinate out of bounds")
-
         cell = self.hidden_grid[row][col]
         if cell == 'S':
             self.hidden_grid[row][col] = 'X'
@@ -168,108 +167,84 @@ def parse_coordinate(coord_str):
     return (row, col)
 
 
-def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2, spectators):
-    player_files = {
-        "Player 1": {"r": rfile1, "w": wfile1},
-        "Player 2": {"r": rfile2, "w": wfile2}
-    }
-    player_boards = {"Player 1": Board(BOARD_SIZE), "Player 2": Board(BOARD_SIZE)}
+# Modify run_multiplayer_game to receive input via queues managed by the server
+def run_multiplayer_game(player1_data, player2_data, p1_input_queue, p2_input_queue, send_message_func, broadcast_board_func):
+    """
+    Runs a multiplayer game instance. Receives player input via queues.
 
-    # Track the last activity time for each player
-    player_last_activity = {
-        "Player 1": time.time(),
-        "Player 2": time.time()
-    }
+    Args:
+        player1_data (dict): Data for Player 1 (including id).
+        player2_data (dict): Data for Player 2 (including id).
+        p1_input_queue (queue.Queue): Queue for input from Player 1.
+        p2_input_queue (queue.Queue): Queue for input from Player 2.
+        send_message_func (callable): Function to send a message to a specific client (player_id, message).
+        broadcast_board_func (callable): Function to send board states to all clients (player1_board, player2_board).
+    """
+    player_tags = {player1_data['id']: "Player 1", player2_data['id']: "Player 2"}
+    player_ids = {"Player 1": player1_data['id'], "Player 2": player2_data['id']}
+    player_boards = {player1_data['id']: Board(BOARD_SIZE), player2_data['id']: Board(BOARD_SIZE)}
+    player_queues = {player1_data['id']: p1_input_queue, player2_data['id']: p2_input_queue}
 
-    # --- Network Helper Functions (defined inside to close over player_files) ---
-    def send_msg_to_player(player_tag, message):
-        wfile = player_files[player_tag]["w"]
-        try:
-            wfile.write(message + '\n')
-            wfile.flush()
-        except (socket.error, BrokenPipeError, ConnectionResetError) as e:
-            raise PlayerDisconnectedException(f"{player_tag} disconnected (send error: {e})")
+    # --- Game Helper Functions using the provided send_message_func ---
+    def send_msg_to_player(player_id, message):
+        send_message_func(player_id, message)
 
-    def recv_msg_from_player(player_tag, timeout=INACTIVITY_TIMEOUT):
-        rfile = player_files[player_tag]["r"]
-
-        # Create a flag for the timeout
-        timeout_flag = {"occurred": False}
-        result = {"data": None}
-
-        # Define a function for the thread to execute
-        def read_input():
-            try:
-                line = rfile.readline()
-                if not line:
-                    raise PlayerDisconnectedException(f"{player_tag} disconnected (EOF on read)")
-                result["data"] = line.strip()
-                # Update last activity time when we get valid input
-                player_last_activity[player_tag] = time.time()
-            except UnicodeDecodeError as e:
-                raise PlayerDisconnectedException(f"{player_tag} sent invalid data (decode error: {e}), assuming disconnect.")
-            except (socket.error, ConnectionResetError) as e:
-                raise PlayerDisconnectedException(f"{player_tag} disconnected (read error: {e})")
-
-        # Create and start the reader thread
-        reader_thread = threading.Thread(target=read_input)
-        reader_thread.daemon = True
-        reader_thread.start()
-
-        # Wait for the thread to complete or timeout
-        reader_thread.join(timeout)
-
-        # Check if the thread is still alive (meaning timeout occurred)
-        if reader_thread.is_alive():
-            timeout_flag["occurred"] = True
-            # We don't want to wait forever, but we can't just interrupt the thread
-            # The thread will eventually complete when input is received or connection fails
-            # But we can proceed with the game by raising a timeout exception
-            raise PlayerTimeoutException(f"{player_tag} timed out after {timeout} seconds")
-
-        # If we get here, the thread completed within the timeout
-        if result["data"] is not None:
-            return result["data"]
-        else:
-            # This should not happen if the read_input function is working correctly
-            raise PlayerDisconnectedException(f"{player_tag} connection resulted in null data")
-
-    def send_board_to_player(player_tag, board_to_send, show_hidden=False):
-        wfile = player_files[player_tag]["w"]
-        try:
-            wfile.write("GRID\n")
-            grid_data = board_to_send.hidden_grid if show_hidden else board_to_send.display_grid
-            header = "  " + "".join(str(i + 1).rjust(2) for i in range(board_to_send.size)) + '\n'
-            wfile.write(header)
+    def send_board_to_player(player_id, board_to_send, show_hidden=False):
+         # The send_message_func needs to handle the "GRID" protocol
+         # We can format the board data and send it as a multi-line message starting with "GRID\n"
+         try:
+            grid_to_print = board_to_send.hidden_grid if show_hidden else board_to_send.display_grid
+            message_lines = ["GRID"]
+            header = "  " + "".join(str(i + 1).rjust(2) for i in range(board_to_send.size))
+            message_lines.append(header)
             for r_idx in range(board_to_send.size):
                 row_label = chr(ord('A') + r_idx)
-                row_str = " ".join(grid_data[r_idx][c_idx] for c_idx in range(board_to_send.size))
-                wfile.write(f"{row_label:2} {row_str}\n")
-            wfile.write('\n')
-            wfile.flush()
-        except (socket.error, BrokenPipeError, ConnectionResetError) as e:
-            raise PlayerDisconnectedException(f"{player_tag} disconnected (send_board error: {e})")
+                row_str = " ".join(grid_to_print[r_idx][c_idx] for c_idx in range(board_to_send.size))
+                message_lines.append(f"{row_label:2} {row_str}")
+            message_lines.append("") # Empty line to indicate end of grid
 
-    # --- Ship Placement Phase (defined inside to use helpers) ---
-    def place_ships_for_player(player_tag):
-        board = player_boards[player_tag]
-        send_msg_to_player(player_tag, f"Welcome, {player_tag}. It's time to place your ships.")
+            # Send all lines as one message (or send line by line via send_message_func if it handles that)
+            # Assuming send_message_func handles multi-line correctly or we join with newline
+            send_message_func(player_id, "\n".join(message_lines))
+
+         except Exception as e:
+             print(f"[ERROR] Failed to send board to {player_id}: {e}")
+             # This might indicate a disconnect, but the server's input handler should catch this first.
+             # If it happens here, we might need a way to signal game termination.
+             pass # Let the server's input handling manage disconnection detection
+
+    # --- Ship Placement Phase ---
+    def place_ships_for_player(player_id):
+        board = player_boards[player_id]
+        player_tag = player_tags[player_id]
+        player_queue = player_queues[player_id]
+        print(f"[DEBUG:run_multiplayer_game] Starting ship placement for {player_tag} ({player_id}).")
+
+        send_msg_to_player(player_id, f"[SYSTEM] Welcome, {player_tag}. It's time to place your ships.")
         for ship_name, ship_size in SHIPS:
             while True:  # Loop for current ship until placed
-                send_msg_to_player(player_tag, f"\n{player_tag}, your current board setup:")
-                send_board_to_player(player_tag, board, show_hidden=True)
-                send_msg_to_player(player_tag, f"Place your {ship_name} (size {ship_size}).")
-                send_msg_to_player(player_tag, "Enter start coordinate (e.g., A1) or type 'quit' to exit:")
+                send_msg_to_player(player_id, f"\n[SYSTEM] {player_tag}, your current board setup:")
+                send_board_to_player(player_id, board, show_hidden=True)
+                send_msg_to_player(player_id, f"[SYSTEM] Place your {ship_name} (size {ship_size}).")
+                send_msg_to_player(player_id, "[SYSTEM] Enter start coordinate (e.g., A1):")
 
                 try:
-                    coord_str = recv_msg_from_player(player_tag, INACTIVITY_TIMEOUT * 2)  # Double timeout for ship placement
-                    if coord_str.lower() == 'quit':
-                        raise PlayerDisconnectedException(f"{player_tag} quit during ship placement.")
+                    # Get coordinate from the queue, with a longer timeout for placement
+                    print(f"[DEBUG:run_multiplayer_game] {player_tag} ({player_id}) is waiting for placement coordinate.")
+                    coord_str = player_queue.get(timeout=INACTIVITY_TIMEOUT * 2)
+                    print(f"[DEBUG:run_multiplayer_game] {player_tag} ({player_id}) received placement coordinate: '{coord_str}'")
 
-                    send_msg_to_player(player_tag, "Enter orientation ('H' or 'V') or type 'quit' to exit:")
-                    orient_str = recv_msg_from_player(player_tag, INACTIVITY_TIMEOUT * 2).upper()  # Double timeout for ship placement
+                    if coord_str.lower() == 'quit':
+                        raise PlayerDisconnectedException(f"{player_id} quit during ship placement.")
+
+                    send_msg_to_player(player_id, "[SYSTEM] Enter orientation ('H' or 'V'):")
+                    print(f"[DEBUG:run_multiplayer_game] {player_tag} ({player_id}) is waiting for placement orientation.")
+                    orient_str = player_queue.get(timeout=INACTIVITY_TIMEOUT * 2).upper()
+                    print(f"[DEBUG:run_multiplayer_game] {player_tag} ({player_id}) received placement orientation: '{orient_str}'")
+
                     if orient_str.lower() == 'quit':
-                        raise PlayerDisconnectedException(f"{player_tag} quit during ship placement.")
+                         raise PlayerDisconnectedException(f"{player_id} quit during ship placement.")
+
 
                     row, col = parse_coordinate(coord_str)
                     orientation_val = -1
@@ -277,348 +252,248 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2, spectators):
                     elif orient_str == 'V': orientation_val = 1
 
                     if orientation_val == -1:
-                        send_msg_to_player(player_tag, "[!] Invalid orientation. Use 'H' for horizontal or 'V' for vertical. Try again.")
+                        send_msg_to_player(player_id, "[!] Invalid orientation. Use 'H' for horizontal or 'V' for vertical. Try again.")
                         continue
                     if board.can_place_ship(row, col, ship_size, orientation_val):
                         positions = board.do_place_ship(row, col, ship_size, orientation_val)
                         board.placed_ships.append({'name': ship_name, 'positions': positions.copy()})
-                        send_msg_to_player(player_tag, f"{ship_name} placed successfully at {coord_str}{orient_str}.")
+                        send_msg_to_player(player_id, f"[SYSTEM] {ship_name} placed successfully at {coord_str}{orient_str}.")
                         break  # Ship placed, exit inner while loop
                     else:
-                        send_msg_to_player(player_tag, f"[!] Cannot place {ship_name} at {coord_str}{orient_str}. It overlaps existing ships or is out of bounds. Try again.")
-                except PlayerTimeoutException:
-                    # For ship placement, we'll be more lenient - just notify and let them try again
-                    send_msg_to_player(player_tag, f"[!] You were inactive for too long. Please respond within {INACTIVITY_TIMEOUT * 2} seconds.")
-                    # We don't break the loop here, giving them another chance
+                        send_msg_to_player(player_id, f"[!] Cannot place {ship_name} at {coord_str}{orient_str}. It overlaps existing ships or is out of bounds. Try again.")
+                except queue.Empty:
+                    # If timeout occurs while waiting for input from the queue
+                    print(f"[DEBUG:run_multiplayer_game] {player_tag} ({player_id}) placement input timed out.")
+                    raise PlayerTimeoutException(f"{player_id} timed out during ship placement after {INACTIVITY_TIMEOUT * 2} seconds")
                 except ValueError as e:  # From parse_coordinate
-                    send_msg_to_player(player_tag, f"[!] Invalid input for {ship_name} placement: {e}. Try again.")
+                    print(f"[DEBUG:run_multiplayer_game] {player_tag} ({player_id}) invalid placement input: {e}")
+                    send_msg_to_player(player_id, f"[!] Invalid input for {ship_name} placement: {e}. Try again.")
+                except PlayerDisconnectedException:
+                    raise # Re-raise the quit exception
+                except Exception as e:
+                     print(f"[ERROR:run_multiplayer_game] Unexpected error during placement for {player_id}: {type(e).__name__}: {e}")
+                     send_msg_to_player(player_id, f"[SYSTEM] An unexpected error occurred during placement. Please try again.")
+                     # Don't re-raise immediately, let the player try again, but log it.
+                     # A critical error might still warrant ending the game.
 
-        send_msg_to_player(player_tag, f"\n{player_tag}, all your ships have been placed:")
-        send_board_to_player(player_tag, board, show_hidden=True)
-        send_msg_to_player(player_tag, "Waiting for the other player to finish placing ships...")
-
-
-    def broadcast_to_spectators(spectators, message):
-        for spec in spectators[:]:  # Use a copy of the list in case it changes during iteration
-            wfile = spec.get("w")
-            if wfile:
-                send_msg_to_spectator(wfile, message)
-
-    def send_msg_to_spectator(spectator_wfile, message):
-        try:
-            spectator_wfile.write(message + '\n')
-            spectator_wfile.flush()
-        except (socket.error, BrokenPipeError, ConnectionResetError) as e:
-            print(f"[ERROR] Spectator disconnected (send error: {e})")
-            # Handle spectator disconnection if needed (cleanup)
-        pass
-
-    def send_both_boards_to_spectators(spectators):
-        # Get both player boards
-        board_p1 = player_boards["Player 1"]
-        board_p2 = player_boards["Player 2"]
-
-        # Prepare the board display strings
-        p1_grid = board_p1.display_grid
-        p2_grid = board_p2.display_grid
-
-        # Format the boards side-by-side
-        board_message = "PLAYER 1                  PLAYER 2\n"
-        board_message += "-" * (len(board_message) - 1) + "\n" # create a separator line of the right length
-        for r_idx in range(board_p1.size):
-            # Row label for P1 (Player 1) and P2 (Player 2)
-            row_label = chr(ord('A') + r_idx)
-            
-            # Build row for Player 1's board (left)
-            row_p1 = " ".join(p1_grid[r_idx][c_idx] for c_idx in range(board_p1.size))
-            
-            # Build row for Player 2's board (right)
-            row_p2 = " ".join(p2_grid[r_idx][c_idx] for c_idx in range(board_p2.size))
-
-            # Combine them into one row
-            board_message += f"{row_label:2} {row_p1}    |    {row_label:2} {row_p2}\n"
-        for spectator in spectators:
-            send_msg_to_spectator(spectator["w"], board_message)
+        send_msg_to_player(player_id, f"\n[SYSTEM] {player_tag}, all your ships have been placed:")
+        send_board_to_player(player_id, board, show_hidden=True)
+        send_msg_to_player(player_id, "[SYSTEM] Waiting for the other player to finish placing ships...")
+        print(f"[DEBUG:run_multiplayer_game] Ship placement finished for {player_tag} ({player_id}).")
 
 
     # --- Main Game Logic ---
     game_active = True  # Flag to control main game loop
-    # Define e_main_handler and e_critical_main outside try for finally block access check
-    e_main_handler = None
-    e_critical_main = None
+    timeout_count = {player1_data['id']: 0, player2_data['id']: 0}  # Track consecutive timeouts
+    MAX_TIMEOUTS = 2  # Maximum number of consecutive timeouts before forfeit
 
-    # Reset player activity times at game start
-    for player in player_last_activity:
-        player_last_activity[player] = time.time()
 
     try:
         # --- Threaded Ship Placement ---
         placement_threads = []
         placement_status = {}  # Stores "success" or the exception object
+        print("[DEBUG:run_multiplayer_game] Starting ship placement threads.")
 
-        def placement_worker(p_tag_worker):
-            nonlocal e_main_handler  # To indicate if an error happened here
+        def placement_worker(player_id_worker):
             try:
-                place_ships_for_player(p_tag_worker)
-                placement_status[p_tag_worker] = "success"
-            except PlayerDisconnectedException as e_disconnect:
-                placement_status[p_tag_worker] = e_disconnect
-                e_main_handler = e_disconnect  # Store first disconnect during placement
-            except PlayerTimeoutException as e_timeout:
-                # If a player times out during placement, we'll treat it as a disconnect
-                custom_disconnect_exception = PlayerDisconnectedException(
-                    f"{p_tag_worker} timed out during ship placement and forfeited")
-                placement_status[p_tag_worker] = custom_disconnect_exception
-                e_main_handler = custom_disconnect_exception
-            except Exception as e_other:
-                print(f"[ERROR] Unexpected critical error in {p_tag_worker} placement thread: {e_other}")
-                custom_disconnect_exception = PlayerDisconnectedException(
-                    f"{p_tag_worker} had a critical error during placement: {e_other}")
-                placement_status[p_tag_worker] = custom_disconnect_exception
-                e_main_handler = custom_disconnect_exception
+                place_ships_for_player(player_id_worker)
+                placement_status[player_id_worker] = "success"
+            except (PlayerDisconnectedException, PlayerTimeoutException, Exception) as e:
+                # Catching general Exception here to report unexpected errors during placement
+                print(f"[ERROR:run_multiplayer_game] Exception during placement worker for {player_id_worker}: {type(e).__name__}: {e}")
+                placement_status[player_id_worker] = e
 
-        for p_tag_for_thread in ["Player 1", "Player 2"]:
-            thread = threading.Thread(target=placement_worker, args=(p_tag_for_thread,))
+        for player_data in [player1_data, player2_data]:
+            player_id_for_thread = player_data['id']
+            thread = threading.Thread(target=placement_worker, args=(player_id_for_thread,))
             placement_threads.append(thread)
             thread.start()
+
+        print("[DEBUG:run_multiplayer_game] Waiting for placement threads to join.")
         for thread in placement_threads:
             thread.join()  # Wait for both placement threads to complete
+        print("[DEBUG:run_multiplayer_game] Placement threads joined.")
 
         # Check results of placement
-        for p_tag_check in ["Player 1", "Player 2"]:
-            status = placement_status.get(p_tag_check)
-            if isinstance(status, PlayerDisconnectedException):
-                raise status  # Propagate the first PlayerDisconnectedException from placement
-            if status != "success":  # Should be an exception if not "success"
-                raise PlayerDisconnectedException(f"{p_tag_check} failed ship placement unexpectedly (status: {status}).")
+        print("[DEBUG:run_multiplayer_game] Checking placement status.")
+        for player_data in [player1_data, player2_data]:
+             p_id_check = player_data['id']
+             status = placement_status.get(p_id_check)
+             if isinstance(status, Exception): # If status is an exception, raise it to terminate the game
+                 print(f"[INFO:run_multiplayer_game] Placement failed for {p_id_check} with exception: {type(status).__name__}")
+                 # Notify the other player that placement failed for their opponent
+                 other_player_id = player2_data['id'] if p_id_check == player1_data['id'] else player1_data['id']
+                 send_msg_to_player(other_player_id, f"[SYSTEM] {player_tags[p_id_check]} failed to place ships ({type(status).__name__}: {status}). Game ending.")
+                 raise status
+             elif status != "success":
+                 # Should not happen, but handle unexpected status
+                 print(f"[ERROR:run_multiplayer_game] Unexpected placement status for {p_id_check}: {status}")
+                 raise Exception(f"Unexpected placement status for {p_id_check}: {status}")
+
+        print("[DEBUG:run_multiplayer_game] Ship placement successful for both players. Starting main game loop.")
 
         # If placement successful for both:
-        send_msg_to_player("Player 1", "\nBoth players have placed ships. The battle begins!")
-        send_msg_to_player("Player 2", "\nBoth players have placed ships. The battle begins!")
-        send_both_boards_to_spectators(spectators)
-        broadcast_to_spectators(spectators, "Game has started!")
+        send_msg_to_player(player1_data['id'], "[SYSTEM] Both players have placed ships. The battle begins!")
+        send_msg_to_player(player2_data['id'], "[SYSTEM] Both players have placed ships. The battle begins!")
+        broadcast_board_func(player_boards[player1_data['id']], player_boards[player2_data['id']]) # Send initial state to spectators
+
 
         # --- Main Game Loop (Turns) ---
         turn_count = 0
-        timeout_count = {"Player 1": 0, "Player 2": 0}  # Track consecutive timeouts
-        MAX_TIMEOUTS = 2  # Maximum number of consecutive timeouts before forfeit
+        print("[DEBUG:run_multiplayer_game] Entering main game loop.")
 
         while game_active:
-            current_player_tag = "Player 1" if turn_count % 2 == 0 else "Player 2"
-            opponent_player_tag = "Player 2" if turn_count % 2 == 0 else "Player 1"
+            current_player_id = player1_data['id'] if turn_count % 2 == 0 else player2_data['id']
+            opponent_player_id = player2_data['id'] if turn_count % 2 == 0 else player1_data['id']
+            current_player_tag = player_tags[current_player_id]
+            opponent_player_tag = player_tags[opponent_player_id]
 
-            target_board = player_boards[opponent_player_tag]  # The board being fired upon
+            target_board = player_boards[opponent_player_id]  # The board being fired upon
+            current_player_queue = player_queues[current_player_id]
+
+            print(f"[DEBUG:run_multiplayer_game] Start of turn {turn_count+1}. Current player: {current_player_tag} ({current_player_id})")
 
             # Send turn information to both players
-            send_msg_to_player(current_player_tag, f"\n--- {current_player_tag}, it's your turn! ---")
-            send_msg_to_player(current_player_tag, f"Your view of {opponent_player_tag}'s board:")
-            send_board_to_player(current_player_tag, target_board, show_hidden=False)  # Show display grid of opponent
+            send_msg_to_player(current_player_id, f"\n--- {current_player_tag}, it's your turn! ---")
+            send_msg_to_player(current_player_id, f"[SYSTEM] Your view of {opponent_player_tag}'s board:")
+            send_board_to_player(current_player_id, target_board, show_hidden=False)  # Show display grid of opponent
 
             # Timeout notification
-            send_msg_to_player(current_player_tag, f"You have {INACTIVITY_TIMEOUT} seconds to make your move.")
+            send_msg_to_player(current_player_id, f"[SYSTEM] You have {INACTIVITY_TIMEOUT} seconds to make your move.")
 
             # Inform the opponent they're waiting for the current player's move
-            send_msg_to_player(opponent_player_tag, f"\nWaiting for {current_player_tag} to make a move...")
+            send_msg_to_player(opponent_player_id, f"\n[SYSTEM] Waiting for {current_player_tag} to make a move...")
 
+
+            guess_input = None
             try:
-                # Ask current player for their move
-                send_msg_to_player(current_player_tag, "Enter coordinate to fire (e.g., A1) or type 'quit' to exit:")
-                guess_input = recv_msg_from_player(current_player_tag)
+                # Wait for a valid move input from the current player's queue
+                # The handle_client_input thread is responsible for putting valid moves here
+                # and handling commands/chat.
+                print(f"[DEBUG:run_multiplayer_game] {current_player_tag} ({current_player_id}) is waiting for move input from queue (timeout: {INACTIVITY_TIMEOUT}s).")
+                guess_input = current_player_queue.get(timeout=INACTIVITY_TIMEOUT)
+                print(f"[DEBUG:run_multiplayer_game] {current_player_tag} ({current_player_id}) received input from queue: '{guess_input}'")
 
-                # Reset timeout counter for this player since they responded
-                timeout_count[current_player_tag] = 0
 
-                # Check if the player wants to quit
-                if guess_input.lower() == 'quit':
-                    game_active = False  # Mark game as ended
-                    quitting_player = current_player_tag
-                    other_player = opponent_player_tag
-                    print(f"[GAME INFO] {quitting_player} has chosen to quit.")
+                # Reset timeout counter for this player since they provided input
+                timeout_count[current_player_id] = 0
 
-                    # Fix: Send a clearer message to both players
-                    try:
-                        send_msg_to_player(quitting_player, f"You have chosen to quit the game. Game over.")
-                    except PlayerDisconnectedException:  # Quitter already gone
-                        print(f"[GAME INFO] {quitting_player} (who was quitting) already disconnected.")
+            except queue.Empty:
+                 # Handle timeout: increment counter and notify players
+                 print(f"[DEBUG:run_multiplayer_game] {current_player_tag} ({current_player_id}) queue get timed out.")
+                 timeout_count[current_player_id] += 1
 
-                    try:
-                        # Fix: Send a clearer message to the other player
-                        send_msg_to_player(other_player, f"\n{quitting_player} has chosen to quit the game. Game over.")
-                    except PlayerDisconnectedException:  # Opponent already gone
-                        print(f"[GAME INFO] Opponent {other_player} was already disconnected when {quitting_player} quit.")
+                 timeout_msg = f"{current_player_tag} did not provide a valid move within {INACTIVITY_TIMEOUT} seconds. "
 
-                    # Exit the game loop
-                    break
+                 if timeout_count[current_player_id] >= MAX_TIMEOUTS:
+                     # Player has timed out MAX_TIMEOUTS times in a row, they forfeit
+                     forfeit_msg = f"[SYSTEM] {current_player_tag} has forfeited the game due to {MAX_TIMEOUTS} consecutive timeouts."
+                     print(f"[GAME INFO] {forfeit_msg}")
 
-                row, col = parse_coordinate(guess_input)
-                result, sunk_ship = target_board.fire_at(row, col)
+                     send_msg_to_player(current_player_id,
+                                       f"[SYSTEM] You have forfeited the game due to {MAX_TIMEOUTS} consecutive timeouts. Game over.")
 
-                msg_for_active_player = f"You fired at {guess_input.upper()}: "
-                msg_for_opponent = f"{current_player_tag} fired at {guess_input.upper()}: "
+                     send_msg_to_player(opponent_player_id,
+                                       f"\n[SYSTEM] {forfeit_msg} You win!")
 
-                if result == 'hit':
-                    send_both_boards_to_spectators(spectators)
-                    if sunk_ship:
-                        msg_for_active_player += f"HIT! You sank their {sunk_ship}!"
-                        msg_for_opponent += f"HIT! Your {sunk_ship} has been SUNK!"
-                        broadcast_to_spectators(spectators, f"{current_player_tag} sunked {opponent_player_tag}'s {sunk_ship}!")
-                        
+                     game_active = False
+                     break
+                 else:
+                     # This is not their MAX_TIMEOUTS timeout, so just skip their turn
+                     timeout_msg += f"Turn skipped ({timeout_count[current_player_id]}/{MAX_TIMEOUTS} strikes)."
+                     print(f"[GAME INFO] {timeout_msg}")
+
+                     send_msg_to_player(current_player_id,
+                                       f"[SYSTEM] You did not provide a move in time. Your turn has been skipped. "
+                                       f"Warning: {timeout_count[current_player_id]}/{MAX_TIMEOUTS} timeouts.")
+
+                     send_msg_to_player(opponent_player_id,
+                                       f"\n[SYSTEM] {current_player_tag} did not provide a move in time. Their turn has been skipped. "
+                                       f"Warning: They have {timeout_count[current_player_id]}/{MAX_TIMEOUTS} timeouts.")
+
+                 # Advance to next turn after a timeout
+                 turn_count += 1
+                 continue # Skip the rest of the loop and start next turn
+
+            # Process the move input received from the queue (only if not None due to timeout)
+            if guess_input is not None:
+                print(f"[DEBUG:run_multiplayer_game] {current_player_tag} ({current_player_id}) processing input '{guess_input}' as a potential move.")
+                try:
+                    row, col = parse_coordinate(guess_input)
+                    result, sunk_ship = target_board.fire_at(row, col)
+
+                    broadcast_board_func(player_boards[player1_data['id']], player_boards[player2_data['id']]) # Update spectators
+
+                    msg_for_active_player = f"You fired at {guess_input.upper()}: "
+                    msg_for_opponent = f"{current_player_tag} fired at {guess_input.upper()}: "
+
+                    if result == 'hit':
+                        if sunk_ship:
+                            msg_for_active_player += f"[SYSTEM] HIT! You sank their {sunk_ship}!"
+                            msg_for_opponent += f"[SYSTEM] HIT! Your {sunk_ship} has been SUNK!"
+                        else:
+                            msg_for_active_player += "[SYSTEM] HIT!"
+                            msg_for_opponent += "[SYSTEM] HIT on one of your ships!"
+                    elif result == 'miss':
+                        msg_for_active_player += "[SYSTEM] MISS."
+                        msg_for_opponent += "[SYSTEM] MISS."
+                    elif result == 'already_shot':
+                        msg_for_active_player += "[SYSTEM] ALREADY SHOT there. Your turn is wasted."
+                        msg_for_opponent += "[SYSTEM] They fired at an already targeted location."
+                    elif result == 'error':
+                         msg_for_active_player += f"[SYSTEM] Error firing: {sunk_ship}" # sunk_ship contains the error message
+                         msg_for_opponent += f"[SYSTEM] Opponent's fire resulted in an error: {sunk_ship}"
+                         # This case suggests an internal game logic issue if parse_coordinate passed.
+                         print(f"[ERROR:run_multiplayer_game] Error result from fire_at: {sunk_ship}")
+
+
+                    send_msg_to_player(current_player_id, msg_for_active_player)
+                    send_msg_to_player(opponent_player_id, msg_for_opponent)
+
+                    # After a shot, show the opponent their updated board
+                    send_msg_to_player(opponent_player_id, f"\n[SYSTEM] {opponent_player_tag}'s board after {current_player_tag}'s shot:")
+                    send_board_to_player(opponent_player_id, target_board, show_hidden=True)  # Show their own board (can see their ships)
+
+
+                    if target_board.all_ships_sunk():
+                        game_active = False  # Mark game as ended
+                        final_win_msg = f"[SYSTEM] GAME OVER! {current_player_tag} WINS! All {opponent_player_tag}'s ships are sunk."
+                        print(f"[GAME INFO] Game ended. {current_player_tag} wins.")
+                        send_msg_to_player(current_player_id, final_win_msg)
+                        send_msg_to_player(current_player_id, f"\n[SYSTEM] Final state of {opponent_player_tag}'s board (what you saw):")
+                        send_board_to_player(current_player_id, target_board, show_hidden=False)
+
+                        send_msg_to_player(opponent_player_id, final_win_msg)
+                        send_msg_to_player(opponent_player_id, f"\n[SYSTEM] Your final board state (all ships shown):")
+                        send_board_to_player(opponent_player_id, target_board, show_hidden=True)
+                        break  # Exit the 'while game_active:' loop
                     else:
-                        msg_for_active_player += "HIT!"
-                        msg_for_opponent += "HIT on one of your ships!"
-                        broadcast_to_spectators(spectators, f"{current_player_tag} hits {opponent_player_tag}'s ship!")
-                elif result == 'miss':
-                    send_both_boards_to_spectators(spectators)
-                    broadcast_to_spectators(spectators, f"{current_player_tag} fired at {opponent_player_tag} and missed.")
-                    msg_for_active_player += "MISS."
-                    msg_for_opponent += "MISS."
-                elif result == 'already_shot':
-                    send_both_boards_to_spectators(spectators)
-                    broadcast_to_spectators(spectators, f"{current_player_tag} fired at an already targeted location.")
-                    msg_for_active_player += "ALREADY SHOT there. Your turn is wasted."
-                    msg_for_opponent += "They fired at an already targeted location."
+                         # If game is not over, advance to next turn
+                         turn_count += 1
 
-                send_msg_to_player(current_player_tag, msg_for_active_player)
-                send_msg_to_player(opponent_player_tag, msg_for_opponent)
 
-                # After a shot, show the opponent their updated board
-                send_msg_to_player(opponent_player_tag, f"\n{opponent_player_tag}'s board after {current_player_tag}'s shot:")
-                send_board_to_player(opponent_player_tag, target_board, show_hidden=True)  # Show their own board (can see their ships)
-                
+                except ValueError as e_parse_fire:  # From parse_coordinate
+                    print(f"[DEBUG:run_multiplayer_game] Invalid move format from {current_player_tag}: '{guess_input}' - {e_parse_fire}")
+                    send_msg_to_player(current_player_id, f"[!] Invalid move input ('{guess_input}'): {e_parse_fire}. Please provide a valid coordinate.")
+                    # Player does not lose turn for bad input formatting.
+                    # The loop continues, and the next iteration will still be this player's turn,
+                    # and it will wait for input from their queue again.
+                    continue # Skip the turn increment
 
-                if target_board.all_ships_sunk():
-                    game_active = False  # Mark game as ended
-                    final_win_msg = f"GAME OVER! {current_player_tag} WINS! All {opponent_player_tag}'s ships are sunk."
-                    send_msg_to_player(current_player_tag, final_win_msg)
-                    send_msg_to_player(current_player_tag, f"\nFinal state of {opponent_player_tag}'s board (what you saw):")
-                    send_board_to_player(current_player_tag, target_board, show_hidden=False)
 
-                    send_msg_to_player(opponent_player_tag, final_win_msg)
-                    send_msg_to_player(opponent_player_tag, f"\nYour final board state (all ships shown):")
-                    send_board_to_player(opponent_player_tag, target_board, show_hidden=True)
-                    break  # Exit the 'while game_active:' loop
+            # Note: turn_count is now incremented either after a successful move or after a timeout.
+            # The continue statement handles skipping the increment only for invalid coordinate format.
 
-            except PlayerTimeoutException:
-                # Handle timeout: increment counter and notify players
-                timeout_count[current_player_tag] += 1
 
-                timeout_msg = f"{current_player_tag} did not respond within {INACTIVITY_TIMEOUT} seconds. "
-
-                if timeout_count[current_player_tag] >= MAX_TIMEOUTS:
-                    # Player has timed out MAX_TIMEOUTS times in a row, they forfeit
-                    forfeit_msg = f"{current_player_tag} has forfeited the game due to {MAX_TIMEOUTS} consecutive timeouts."
-                    print(f"[GAME INFO] {forfeit_msg}")
-
-                    try:
-                        send_msg_to_player(current_player_tag,
-                                          f"You have forfeited the game due to {MAX_TIMEOUTS} consecutive timeouts. Game over.")
-                    except PlayerDisconnectedException:
-                        pass  # Player may have disconnected
-
-                    try:
-                        send_msg_to_player(opponent_player_tag,
-                                          f"\n{forfeit_msg} You win!")
-                    except PlayerDisconnectedException:
-                        pass  # Other player may have disconnected
-
-                    game_active = False
-                    break
-                else:
-                    # This is not their MAX_TIMEOUTS timeout, so just skip their turn
-                    timeout_msg += f"Turn skipped ({timeout_count[current_player_tag]}/{MAX_TIMEOUTS} strikes)."
-                    print(f"[GAME INFO] {timeout_msg}")
-
-                    try:
-                        send_msg_to_player(current_player_tag,
-                                          f"You did not respond in time. Your turn has been skipped. "
-                                          f"Warning: {timeout_count[current_player_tag]}/{MAX_TIMEOUTS} timeouts.")
-                    except PlayerDisconnectedException:
-                        # If we can't reach the player who timed out, they might have disconnected
-                        raise PlayerDisconnectedException(f"{current_player_tag} disconnected after timeout")
-
-                    try:
-                        send_msg_to_player(opponent_player_tag,
-                                          f"\n{current_player_tag} did not respond in time. Their turn has been skipped. "
-                                          f"Warning: They have {timeout_count[current_player_tag]}/{MAX_TIMEOUTS} timeouts.")
-                    except PlayerDisconnectedException:
-                        # If we can't reach the other player, they might have disconnected
-                        raise PlayerDisconnectedException(f"{opponent_player_tag} disconnected during opponent timeout handling")
-
-            except ValueError as e_parse_fire:  # From parse_coordinate or fire_at (if it raises one)
-                send_msg_to_player(current_player_tag, f"[!] Invalid move input ('{guess_input}'): {e_parse_fire}. Please try again this turn.")
-                # Player does not lose turn for bad input formatting.
-                continue  # Skip the turn increment to let this player try again
-
-            # Advance to next turn
-            turn_count += 1
-
-    except PlayerDisconnectedException as e_disconnect_main:
-        e_main_handler = e_disconnect_main  # Store the exception for finally block
-        game_active = False
-        disconnected_msg_detail = str(e_disconnect_main)
-        print(f"[GAME INFO] A player disconnected: {disconnected_msg_detail}. Game ending.")
-
-        # Determine which player is remaining to notify
-        # The disconnected_msg_detail usually starts with "Player X disconnected..."
-        remaining_player = None
-        if "Player 1" in disconnected_msg_detail: remaining_player = "Player 2"
-        elif "Player 2" in disconnected_msg_detail: remaining_player = "Player 1"
-
-        if remaining_player:
-            try:
-                # Fix: Provide a clearer message to the remaining player
-                notification_msg = f"\nThe game has ended because your opponent disconnected or quit."
-                send_msg_to_player(remaining_player, notification_msg)
-            except PlayerDisconnectedException:
-                print(f"[GAME INFO] {remaining_player} also disconnected or unreachable while notifying of opponent's disconnect.")
-        else:
-            print(f"[GAME INFO] Could not reliably determine remaining player to notify from message: {disconnected_msg_detail}")
-
-    except Exception as e_critical:
-        e_critical_main = e_critical  # Store for finally
-        game_active = False
-        print(f"[CRITICAL ERROR in run_multiplayer_game] Type: {type(e_critical)}, Error: {e_critical}")
-        # Attempt to notify both players if a very unexpected error occurs
-        critical_error_msg = "A critical server error occurred in the game. The game has to end."
-        for p_tag_crit_notify in ["Player 1", "Player 2"]:
-            try: send_msg_to_player(p_tag_crit_notify, critical_error_msg)
-            except: pass  # Best effort notification
+    except (PlayerDisconnectedException, Exception) as e_game_end:
+         # Catch disconnects or unexpected errors during the main game loop or placement setup
+         print(f"[GAME INFO] Game ending due to exception: {type(e_game_end).__name__}: {e_game_end}")
+         game_active = False # Ensure loop terminates
+         # The server's handle_client_input threads should detect disconnections and handle cleanup
 
     finally:
-        print(f"[INFO] run_multiplayer_game is concluding for players associated with this game instance.")
-
-        # Determine the final message based on how the game ended
-        final_goodbye_msg = "The game session has ended. Goodbye."  # Default
-
-        if e_critical_main:  # A critical, unexpected error occurred
-            final_goodbye_msg = "The game session has ended due to a server error. Goodbye."
-        elif e_main_handler:  # A player disconnected (PlayerDisconnectedException was caught)
-            final_goodbye_msg = f"The game session has ended due to a disconnection. Goodbye."
-        elif not game_active:  # Game ended by win/loss or explicit "quit" command
-            # Fix: Include a goodbye message even if the game ended normally
-            final_goodbye_msg = "The game has ended. Thank you for playing Battleship!"
-
-        # Send the final goodbye message to both players
-        for p_tag_final_cleanup in ["Player 1", "Player 2"]:
-            wfile_cleanup = player_files[p_tag_final_cleanup]["w"]
-            rfile_cleanup = player_files[p_tag_final_cleanup]["r"]
-
-            if wfile_cleanup and not wfile_cleanup.closed:
-                try:
-                    if final_goodbye_msg:  # Only send if a message is determined
-                        wfile_cleanup.write(final_goodbye_msg + '\n')
-                        wfile_cleanup.flush()
-                except (socket.error, BrokenPipeError, ConnectionResetError):
-                    pass # Ignore if connection is already broken
-                finally: # Always attempt to close
-                    try: wfile_cleanup.close()
-                    except: pass
-
-            if rfile_cleanup and not rfile_cleanup.closed:
-                try: rfile_cleanup.close()
-                except: pass
-        print("[INFO] Game resources cleaned up for this instance.")
-        # print("[INFO] If you would like, reconnect to the server to keep playing!")
+        print(f"[INFO:run_multiplayer_game] run_multiplayer_game is concluding for players {player1_data['id']} and {player2_data['id']}.")
+        # The server wrapper (run_game_wrapper) is responsible for post-game cleanup and signaling.
 
 
 def run_single_player_game_locally(): # For local testing, unchanged
@@ -653,4 +528,7 @@ def run_single_player_game_locally(): # For local testing, unchanged
 
 
 if __name__ == "__main__":
+    # This block is for local testing of the game logic only.
+    # The multiplayer game is run by server.py.
+    print("Running local single-player game for testing...")
     run_single_player_game_locally()
