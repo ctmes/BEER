@@ -11,17 +11,15 @@ HOST = '127.0.0.1'
 PORT = 5001
 
 # Global server state
-# Added 'last_input_time' to client data for input rate limiting
-clients = {} # {client_id: {"r": rfile, "w": wfile, "addr": addr, "id": client_id, "role": "player" or "spectator", "input_queue": queue.Queue() if player, "last_input_time": float, "socket": socket_obj}}
-players_waiting = [] # List of client_ids waiting for a game
-spectators_waiting = [] # List of client_ids waiting for a game or spectating
+clients = {}
+players_waiting = []
+spectators_waiting = []
 game_in_progress = False
-game_thread = None # Thread for the current game instance
-lock = threading.RLock() # Lock for accessing shared server state
+game_thread = None
+lock = threading.RLock()
 
-GAME_START_COUNTDOWN = 5  # seconds
+GAME_START_COUNTDOWN = 5
 
-# --- Rate Limiting and Connection Limits ---
 MAX_CONNECTIONS = 6
 INPUT_RATE_LIMIT_PER_SECOND = 2
 INPUT_RATE_DELAY = 1.0 / INPUT_RATE_LIMIT_PER_SECOND
@@ -30,29 +28,36 @@ print(f"[DEBUG] Initializing server with HOST: {HOST}, PORT: {PORT}")
 
 
 def send_message_to_client(client_id, message):
-    """Safely sends a message to a client."""
-    # print(f"[DEBUG] Attempting to send message to {client_id}: {message[:50]}...") # Log message attempt
+    """
+    TIER 1.4 SIMPLE CLIENT/SERVER MESSAGE EXCHANGE, TIER 1.5 NO DISCONNECTION HANDLING / TIER 2.4 DISCONNECTION HANDLING -
+    Safely sends a message to a client, handling potential disconnection errors during the send operation.
+
+    Args:
+        client_id (str): The ID of the client to send the message to.
+        message (str): The message string to send.
+    """
     with lock:
         client_data = clients.get(client_id)
         if client_data and client_data.get("w") and not client_data["w"].closed:
             try:
                 client_data["w"].write(message + '\n')
                 client_data["w"].flush()
-                # print(f"[DEBUG] Successfully sent message to {client_id}")
             except (socket.error, BrokenPipeError, ConnectionResetError) as e:
                 print(f"[INFO] Client {client_id} disconnected during send: {e}")
-                # Connection lost, handle removal
                 remove_client(client_id)
             except Exception as e:
                  print(f"[ERROR] Unexpected error sending to {client_id}: {e}")
                  remove_client(client_id)
-        # else:
-            # print(f"[DEBUG] Attempted to send to non-existent or closed client {client_id}")
 
 
 def broadcast_to_all(message, sender_id=None):
-    """Broadcasts a message to all connected clients except the sender."""
-    # print(f"[DEBUG] Broadcasting message: '{message}'") # Too verbose
+    """
+    TIER 4.2 INSTANT MESSAGING (IM) CHANNEL - Broadcasts a message to all connected clients except the sender.
+
+    Args:
+        message (str): The message string to broadcast.
+        sender_id (str, optional): The ID of the client who sent the message (to exclude them from broadcast). Defaults to None.
+    """
     client_ids_to_send = []
     with lock:
         client_ids_to_send = list(clients.keys())
@@ -63,13 +68,17 @@ def broadcast_to_all(message, sender_id=None):
 
 
 def broadcast_game_board_state(player1_board, player2_board):
-    """Sends the current public board state to all spectators."""
-    # Format the boards side-by-side
-    board_message = "GRID\n" # Indicate start of grid data
+    """
+    TIER 3.2 SPECTATOR EXPERIENCE - Sends the current public board state (opponent's view) to all spectators in a formatted way.
+
+    Args:
+        player1_board (Board): The board object for Player 1.
+        player2_board (Board): The board object for Player 2.
+    """
+    board_message = "GRID\n"
     board_message += "PLAYER 1                  PLAYER 2\n"
-    # Calculate separator length based on expected grid width + spacing
-    separator_len = (BOARD_SIZE * 2) + 2 + len("    |    ") + (BOARD_SIZE * 2) + 2 # Adjusted length calculation
-    board_message += "-" * (separator_len if separator_len > 0 else 40) + "\n" # Ensure min length
+    separator_len = (BOARD_SIZE * 2) + 2 + len("    |    ") + (BOARD_SIZE * 2) + 2
+    board_message += "-" * (separator_len if separator_len > 0 else 40) + "\n"
 
     p1_grid = player1_board.display_grid
     p2_grid = player2_board.display_grid
@@ -81,18 +90,24 @@ def broadcast_game_board_state(player1_board, player2_board):
         row_p2 = " ".join(p2_grid[r_idx][c_idx] for c_idx in range(BOARD_SIZE))
 
         board_message += f"{row_label:2} {row_p1}    |    {row_label:2} {row_p2}\n"
-    board_message += "\n" # Indicate end of grid data
+    board_message += "\n"
 
     with lock:
         spectator_ids = [cid for cid, data in clients.items() if data.get("role") == "spectator"]
 
     for spec_id in spectator_ids:
          send_message_to_client(spec_id, board_message)
-    # print("[DEBUG] Broadcasted game board state to spectators.")
 
 
 def handle_command(client_id, command):
-    """Handles commands received from clients."""
+    """
+    TIER 1.4 SIMPLE CLIENT/SERVER MESSAGE EXCHANGE, TIER 2.1 EXTENDED INPUT VALIDATION, TIER 4.2 INSTANT MESSAGING (IM) CHANNEL -
+    Handles commands received from clients (e.g., /help, /quit, /chat, /status), processing valid commands and informing about unknown ones.
+
+    Args:
+        client_id (str): The ID of the client who sent the command.
+        command (str): The command string.
+    """
     command_parts = command.lower().strip().split(maxsplit=1)
     cmd = command_parts[0]
     args = command_parts[1] if len(command_parts) > 1 else ""
@@ -109,23 +124,24 @@ def handle_command(client_id, command):
             help_text = "Available commands: /help, /quit, /chat <message>"
         elif client_role == "spectator":
              help_text = "Available commands: /help, /quit, /status, /chat <message>"
-        else: # Should not happen if role is set correctly
+        else:
              help_text = "Available commands: /help, /quit (You are in a transitional state)"
 
         send_message_to_client(client_id, f"[SYSTEM] {help_text}")
 
     elif cmd == "/status":
+        """
+        TIER 2.4 DISCONNECTION HANDLING - Provides the client with their current status and queue position if they are a spectator.
+        """
         if client_role == "player":
-            with lock: # Access game_in_progress state under lock
+            with lock:
                 if game_in_progress:
                     send_message_to_client(client_id, "[SYSTEM] You are currently playing a game.")
                 else:
-                    # Player role but game not in progress - should only happen briefly
                     send_message_to_client(client_id, "[SYSTEM] You are registered as a player. Waiting for the game to start.")
         elif client_role == "spectator":
             with lock:
                 try:
-                    # Find position in the combined waiting queue
                     combined_queue = players_waiting + spectators_waiting
                     position = -1
                     for i, cid in enumerate(combined_queue):
@@ -137,22 +153,19 @@ def handle_command(client_id, command):
                         send_message_to_client(client_id, f"[SYSTEM] You are #{position} in the queue.")
                         if game_in_progress:
                             remaining_in_queue = len(combined_queue) - position
-                            # Simple estimate: 2 players per game
                             games_to_wait = (remaining_in_queue + 1) // 2
                             if games_to_wait == 0:
                                  send_message_to_client(client_id, "[SYSTEM] You will play in the next game!")
                             else:
                                  send_message_to_client(client_id, f"[SYSTEM] You will need to wait for approximately {games_to_wait} more game(s).")
                         else:
-                            # No game in progress, estimate games to wait based on current queue size
                             estimated_games_in_queue = (len(players_waiting) + len(spectators_waiting) + 1) // 2
-                            games_to_wait = max(0, estimated_games_in_queue - (position + 1) // 2) # crude estimate
+                            games_to_wait = max(0, estimated_games_in_queue - (position + 1) // 2)
 
                             if position <= 2:
                                 send_message_to_client(client_id, "[SYSTEM] You are next in line for the game!")
                             else:
-                                # Another crude estimate considering those who might become players first
-                                games_to_wait_further = (position - (len(players_waiting) + 1)) // 2 + 1 if len(players_waiting) < 2 else (position - 3) // 2 + 1 # rough estimate
+                                games_to_wait_further = (position - (len(players_waiting) + 1)) // 2 + 1 if len(players_waiting) < 2 else (position - 3) // 2 + 1
                                 send_message_to_client(client_id, f"[SYSTEM] Waiting for enough players. You are #{position} in queue.")
 
 
@@ -164,16 +177,10 @@ def handle_command(client_id, command):
 
     elif cmd == "/quit":
         send_message_to_client(client_id, "[SYSTEM] You have chosen to quit. Disconnecting.")
-        # Signal to remove client - removal happens outside command handling to avoid issues
-        # Let the handle_client_input thread detect the connection close after sending this.
-        # Or we could put a special message in the queue/flag for the handle_client_input thread.
-        # For now, rely on connection close detection.
-        pass # Removal is handled by the thread detecting disconnection
+        pass
 
     elif cmd == "/chat":
          if args:
-            # Format the chat message and broadcast
-            # Use client ID as name for now, could use a player/spectator prefix
             sender_info = client_id
             with lock:
                  client_data = clients.get(client_id)
@@ -190,58 +197,60 @@ def handle_command(client_id, command):
 
 
 def handle_client_input(client_id):
-    """Thread function to continuously read input from a client."""
+    """
+    TIER 1.1 CONCURRENCY ISSUES, TIER 1.4 SIMPLE CLIENT/SERVER MESSAGE EXCHANGE,
+    TIER 1.5 NO DISCONNECTION HANDLING / TIER 2.4 DISCONNECTION HANDLING,
+    TIER 2.1 EXTENDED INPUT VALIDATION, TIER 3.1 MULTIPLE CONCURRENT CONNECTIONS,
+    TIER 3.2 SPECTATOR EXPERIENCE, TIER 4.4 SECURITY FLAWS & MITIGATIONS -
+    Thread function to continuously read input from a client, process commands, game input, and chat messages,
+    handle disconnections, and enforce input rate limiting.
+
+    Args:
+        client_id (str): The ID of the client whose input is being handled.
+    """
     print(f"[DEBUG] handle_client_input thread started for {client_id}")
     rfile = None
 
-    with lock: # Acquire lock initially to get rfile
+    with lock:
         client_data = clients.get(client_id)
         if client_data:
             rfile = client_data["r"]
         else:
             print(f"[ERROR] handle_client_input started for unknown client_id {client_id}")
-            return # Exit thread if client data not found
+            return
 
     try:
         while True:
             line = rfile.readline()
             if not line:
                 print(f"[INFO] Client {client_id} disconnected (readline returned empty).")
-                break # Exit loop on disconnection
+                break
 
             line = line.strip()
             if not line:
-                continue # Ignore empty lines
+                continue
 
             print(f"[DEBUG] Received from {client_id}: '{line}'")
 
-            # --- Input Rate Limiting Check ---
             current_time = time.time()
             with lock:
                 client_data = clients.get(client_id)
-                if client_data: # Ensure client data still exists
+                if client_data:
                     time_since_last_input = current_time - client_data['last_input_time']
                     if time_since_last_input < INPUT_RATE_DELAY:
                         send_message_to_client(client_id, "[SYSTEM] Input rate limit exceeded. Slow down.")
-                        continue # Ignore this input and wait for the next one
-                    client_data['last_input_time'] = current_time # Update last input time
+                        continue
+                    client_data['last_input_time'] = current_time
 
-                # Get current role, game state, and queue under the lock after rate limit check
                 current_role = client_data.get("role") if client_data else None
                 player_input_queue = client_data.get("input_queue") if client_data else None
-                current_game_in_progress = game_in_progress # Get the global game state
+                current_game_in_progress = game_in_progress
 
 
             if line.startswith('/'):
-                # It's a command
                 handle_command(client_id, line)
             else:
-                # It's not a command. Could be a game move or chat.
-                # Use the state retrieved under the lock
-                # Ensure client_data still exists and role is player and game is active
                 if current_role == "player" and current_game_in_progress and player_input_queue:
-                    # If it's a player in an active game AND they have an input queue,
-                    # put the input into their queue for the game logic to process.
                     try:
                         print(f"[DEBUG:handle_client_input] Putting input '{line}' into {client_id}'s queue (Role: {current_role}, Game: {current_game_in_progress}).")
                         player_input_queue.put_nowait(line)
@@ -252,9 +261,6 @@ def handle_client_input(client_id):
                          send_message_to_client(client_id, "[SYSTEM] An error occurred processing your input.")
 
                 else:
-                    # If it's a spectator, or a player not in a game, or a player in game
-                    # but without an input queue (shouldn't happen), or input wasn't for game... treat as chat.
-                    # Use the current role retrieved under the lock for chat message formatting
                     sender_info = f"{current_role.capitalize()} {client_id}" if current_role else client_id
                     chat_message = f"[CHAT] {sender_info}: {line}"
                     broadcast_to_all(chat_message, sender_id=client_id)
@@ -268,19 +274,24 @@ def handle_client_input(client_id):
         print(f"[DEBUG] Client input thread for {client_id} finished.")
 
 def remove_client(client_id):
-    """Removes a client and cleans up resources."""
+    """
+    TIER 1.5 NO DISCONNECTION HANDLING / TIER 2.4 DISCONNECTION HANDLING -
+    Removes a client from the server state, cleans up resources, and updates spectator positions.
+
+    Args:
+        client_id (str): The ID of the client to remove.
+    """
     global clients, players_waiting, spectators_waiting, game_in_progress, game_thread
     print(f"[DEBUG] Attempting to remove client {client_id}")
 
     client_data = None
     client_was_player_in_game = False
-    game_player_ids = [] # To check if this client was in the current game
+    game_player_ids = []
 
     with lock:
         client_data = clients.pop(client_id, None)
         if client_data:
             print(f"[INFO] Removed client {client_id} from clients dictionary.")
-            # Remove from waiting queues if present
             if client_id in players_waiting:
                 players_waiting.remove(client_id)
                 print(f"[DEBUG] Removed {client_id} from players_waiting.")
@@ -288,24 +299,12 @@ def remove_client(client_id):
                 spectators_waiting.remove(client_id)
                 print(f"[DEBUG] Removed {client_id} from spectators_waiting.")
 
-            # Check if this client was one of the players in the active game
-            if game_in_progress and game_thread and game_thread.is_alive():
-                # We need a way to access the player IDs from the game_thread.
-                # A robust way is for the game_thread to store/expose player IDs.
-                # For now, let's rely on the game logic detecting the disconnection.
-                # A more direct approach would involve signaling the game thread.
-                 pass # Game termination handled by game logic or wrapper detection
-
-
         else:
             print(f"[DEBUG] Client {client_id} not found in clients dictionary during removal attempt.")
 
 
     if client_data:
-        # Close file objects and socket outside the lock
-        # Closing rfile/wfile should signal the corresponding thread reading/writing to them.
-        # The socket itself should also be closed. Let's add socket closing if available.
-        sock = client_data.get("socket") # Assuming we store socket object now
+        sock = client_data.get("socket")
         if client_data.get("r") and not client_data["r"].closed:
             try: client_data["r"].close()
             except: pass
@@ -317,58 +316,52 @@ def remove_client(client_id):
             except: pass
 
 
-    # Update spectator positions after removal if the removal affected the queue
     with lock:
-        # Update positions if the removal affected the queue length
-        # This check is simplified - any removal *could* affect positions
         print(f"[DEBUG] Client removal occurred. Updating spectator positions.")
         update_spectator_positions()
 
     print(f"[DEBUG] remove_client finished for {client_id}")
-    # Check if game should start if enough players are now waiting
-    # This might be redundant if run_game_wrapper calls check_start_game, but ensures
-    # a game starts if players disconnect before a game starts.
     check_start_game()
 
 
 def update_spectator_positions():
-    """Informs spectators about their updated position in the queue."""
+    """
+    TIER 2.4 DISCONNECTION HANDLING / TIER 3.2 SPECTATOR EXPERIENCE -
+    Informs spectators about their updated position in the queue.
+    """
     print(f"[DEBUG] update_spectator_positions called.")
     with lock:
-        # Combine players_waiting and spectators_waiting to get the full queue
         current_queue = players_waiting + spectators_waiting
-        # print(f"[DEBUG] Current queue: {current_queue}") # Too verbose
 
-        # Build messages first, then send outside this loop to minimize time under lock
-        messages_to_send = [] # List of (client_id, message)
+        messages_to_send = []
 
         for i, client_id in enumerate(current_queue):
             position = i + 1
-            # Get client data to confirm role for messaging
             client_data = clients.get(client_id)
-            if client_data: # Ensure client still exists
+            if client_data:
                 try:
                     message = f"[SYSTEM] Queue update: You are now #{position} in line."
                     if position <= 2 and not game_in_progress:
                          message += " Preparing for your game soon..."
-                    # More detailed wait time estimation could go here
                     messages_to_send.append((client_id, message))
 
                 except Exception as e:
                     print(f"[ERROR] Error preparing position update for {client_id}: {e}")
-                    # This client might be disconnecting, handle removal later
 
-        # Send messages outside the lock
         for client_id, message in messages_to_send:
-             # remove_client might be called inside send_message_to_client,
-             # modifying the clients dict. This is handled by send_message_to_client's check.
              send_message_to_client(client_id, message)
 
     print(f"[DEBUG] update_spectator_positions finished.")
 
 
 def recycle_players_to_spectators(game_player_ids):
-    """Moves players from the just-finished game back to the spectator queue."""
+    """
+    TIER 2.2 SUPPORT MULTIPLE GAMES / TIER 3.4 TRANSITION TO NEXT MATCH -
+    Moves players from the just-finished game back to the spectator queue, if they are still connected.
+
+    Args:
+        game_player_ids (list): A list of client IDs that were playing in the finished game.
+    """
     global players_waiting, spectators_waiting, clients
     print(f"[DEBUG] Recycling players {game_player_ids} to spectators called.")
     with lock:
@@ -376,73 +369,63 @@ def recycle_players_to_spectators(game_player_ids):
         for player_id in game_player_ids:
             client_data = clients.get(player_id)
             if client_data and client_data.get("role") == "player":
-                # Check if client is still connected before trying to recycle
                 if client_data.get("w") and not client_data["w"].closed:
                     try:
                         send_message_to_client(player_id, "[SYSTEM] Game has ended. You are being returned to the spectator queue.")
-                        client_data["role"] = "spectator" # Change role
-                        client_data.pop("input_queue", None) # Remove player-specific queue
-                        spectators_waiting.append(player_id) # Add back to waiting list
+                        client_data["role"] = "spectator"
+                        client_data.pop("input_queue", None)
+                        spectators_waiting.append(player_id)
                         recycled_count += 1
                         print(f"[INFO] Recycled {player_id} to spectators queue.")
                     except Exception as e:
-                         # If sending fails here, they are effectively disconnected
                         print(f"[INFO] Player {player_id} connection issue during recycling: {e}. Not recycling to queue.")
-                        remove_client(player_id) # Ensure removal
+                        remove_client(player_id)
                 else:
                     print(f"[INFO] Player {player_id} already disconnected. Not recycling.")
-                    # No need to call remove_client here, handle_client_input thread should have done it
-                    # or it will be cleaned up by removing from clients dict.
-
-        # Note: Disconnected players are not added back to spectators_waiting.
-        # remove_client handles their removal from clients and existing waiting lists.
 
         print(f"[DEBUG] {recycled_count} players recycled.")
         print(f"[DEBUG] Players waiting after recycling: {players_waiting}")
         print(f"[DEBUG] Spectators waiting after recycling: {spectators_waiting}")
-        # Update positions for those remaining in queue
         update_spectator_positions()
     print(f"[DEBUG] recycle_players_to_spectators finished.")
 
 
 def promote_spectators_to_players():
-    """Promotes the first two eligible clients from the waiting queue to players."""
-    global players_waiting, spectators_waiting, clients
+    """
+    TIER 1.2 SERVER AND TWO CLIENTS, TIER 2.2 SUPPORT MULTIPLE GAMES / TIER 3.4 TRANSITION TO NEXT MATCH, TIER 3.1 MULTIPLE CONCURRENT CONNECTIONS -
+    Promotes the first two eligible clients from the combined waiting queue to players for a new game, updating their roles and creating input queues.
+
+    Returns:
+        tuple: A tuple containing a boolean (True if two players were promoted, False otherwise)
+               and a list of the client IDs of the promoted players.
+    """
     print(f"[DEBUG] promote_spectators_to_players called.")
     promoted = False
-    players_for_game = [] # Store client_ids of promoted players
+    players_for_game = []
 
     with lock:
-        # Combine and filter for clients that are still connected
         combined_queue = players_waiting + spectators_waiting
-        eligible_clients_ids = [cid for cid in combined_queue if cid in clients and clients[cid].get("w") and not clients[cid]["w"].closed] # Check if connection is active
+        eligible_clients_ids = [cid for cid in combined_queue if cid in clients and clients[cid].get("w") and not clients[cid]["w"].closed]
 
         print(f"[DEBUG] Eligible clients in queue: {eligible_clients_ids}")
 
         if len(eligible_clients_ids) >= 2:
             print(f"[DEBUG] Enough eligible clients ({len(eligible_clients_ids)}) to promote two.")
-            # Promote the first two eligible clients
             players_for_game = eligible_clients_ids[:2]
 
-            # Remove promoted players from the waiting queues and update roles/queues in clients dict
             for player_id in players_for_game:
-                # Remove from whichever queue they were in
                 if player_id in players_waiting:
                     players_waiting.remove(player_id)
                 elif player_id in spectators_waiting:
                     spectators_waiting.remove(player_id)
 
-                # Update client data
                 client_data = clients.get(player_id)
                 if client_data:
                     client_data["role"] = "player"
-                    client_data["input_queue"] = queue.Queue() # Create a new input queue for the game
-                    # last_input_time already exists from when they connected
+                    client_data["input_queue"] = queue.Queue()
                     print(f"[DEBUG] Promoted {player_id} to player role and assigned new queue.")
                 else:
                     print(f"[ERROR] Promoted client {player_id} not found in clients dict during role update.")
-                    # This is a critical issue, ideally shouldn't happen if eligible_clients_ids was correct.
-                    # Remove this client from the list of players for the game.
                     if player_id in players_for_game: players_for_game.remove(player_id)
 
 
@@ -451,32 +434,24 @@ def promote_spectators_to_players():
                  print(f"[DEBUG] Successfully promoted {players_for_game[0]} and {players_for_game[1]} to players for the next game.")
 
                  try:
-                    # Inform the new players
                     send_message_to_client(players_for_game[0], "[SYSTEM] You are Player 1 in the new game. Preparing to start...")
                     send_message_to_client(players_for_game[1], "[SYSTEM] You are Player 2 in the new game. Preparing to start...")
                  except Exception as e:
                      print(f"[ERROR] Error informing new players after promotion: {e}")
-                     # If we can't message a new player, they are likely disconnected.
-                     # The game wrapper will need to handle this if it starts.
                      pass
 
 
             else:
                 print(f"[DEBUG] Failed to get exactly two eligible players after processing ({len(players_for_game)} found).")
-                # If we promoted less than 2, put the ones we did promote back to spectator role/queue?
-                # Or just rely on the game wrapper failing to start with < 2 players.
-                # Let's rely on the wrapper for now.
-                players_for_game = [] # Reset if not exactly two promoted
+                players_for_game = []
                 promoted = False
 
-
-            # Update positions for remaining spectators in the queue
             update_spectator_positions()
 
         else:
-            print(f"[DEBUG] Not enough eligible clients ({len(eligible_clients_ids)}) to promote.")
+            print(f"[DEBUG] Not enough eligible clients to start a game. Waiting.")
 
-        print(f"[DEBUG] Players for next game: {[p for p in players_for_game]}") # Print the list directly
+        print(f"[DEBUG] Players for next game: {[p for p in players_for_game]}")
         print(f"[DEBUG] Players waiting after promotion attempt: {players_waiting}")
         print(f"[DEBUG] Spectators waiting after promotion attempt: {spectators_waiting}")
 
@@ -485,25 +460,28 @@ def promote_spectators_to_players():
 
 
 def run_game_countdown():
-    """Runs the countdown before a game starts."""
+    """
+    TIER 2.2 SUPPORT MULTIPLE GAMES / TIER 3.4 TRANSITION TO NEXT MATCH -
+    Runs the countdown before a game starts, broadcasting the countdown to all clients.
+    """
     print(f"[DEBUG] run_game_countdown called.")
-    # Ensure clients list is stable during broadcast by taking snapshot
     client_ids_at_countdown_start = []
     with lock:
          client_ids_at_countdown_start = list(clients.keys())
 
     for i in range(GAME_START_COUNTDOWN, 0, -1):
         message = f"[SYSTEM] New game starting in {i} seconds..."
-        # print(f"[DEBUG] Countdown: {message}") # Too verbose
-        # Broadcast to all *currently connected* clients
-        broadcast_to_all(message) # broadcast_to_all handles disconnects
+        broadcast_to_all(message)
         time.sleep(1)
     broadcast_to_all("[SYSTEM] Game is starting now!")
     print(f"[DEBUG] Countdown finished. Game start message sent.")
 
 
 def check_start_game():
-    """Checks if a new game can be started and initiates it."""
+    """
+    TIER 1.2 SERVER AND TWO CLIENTS, TIER 2.2 SUPPORT MULTIPLE GAMES / TIER 3.4 TRANSITION TO NEXT MATCH -
+    Checks if a new game can be started based on the waiting queues and initiates it if possible by promoting players and starting the game wrapper thread.
+    """
     global game_in_progress, game_thread
     print(f"[DEBUG] check_start_game called.")
     with lock:
@@ -511,7 +489,6 @@ def check_start_game():
             print(f"[DEBUG] Game already in progress. Skipping check_start_game.")
             return
 
-        # Try to promote players from the waiting queue
         promoted, players_for_game = promote_spectators_to_players()
 
         if promoted:
@@ -519,16 +496,12 @@ def check_start_game():
             game_in_progress = True
             print(f"[DEBUG] game_in_progress set to {game_in_progress}.")
 
-            # Get the client data and input queues for the players
             player1_data = clients.get(players_for_game[0])
             player2_data = clients.get(players_for_game[1])
 
-            # Double check if player data is still valid (e.g., not removed between promote and here)
             if not player1_data or player1_data.get("role") != "player" or not player2_data or player2_data.get("role") != "player":
                  print(f"[ERROR] Promoted player data became invalid before starting game. Cannot start game.")
-                 game_in_progress = False # Reset flag
-                 # Requeue or drop these clients? For now, let remove_client handle it.
-                 # Re-check for next game opportunities.
+                 game_in_progress = False
                  check_start_game()
                  return
 
@@ -546,18 +519,21 @@ def check_start_game():
             print(f"[DEBUG] Game wrapper thread started.")
         else:
             print(f"[DEBUG] Not enough eligible clients to start a game. Waiting.")
-            # Inform waiting players/spectators if the game just ended and not enough players for next
-            # This is handled by run_game_wrapper's cleanup.
 
 
 def run_game_wrapper(player1_data, player2_data):
-    """Wrapper to run the game and handle post-game cleanup."""
-    global game_in_progress, game_thread
+    """
+    TIER 2.2 SUPPORT MULTIPLE GAMES / TIER 3.4 TRANSITION TO NEXT MATCH, TIER 1.5 NO DISCONNECTION HANDLING / TIER 2.4 DISCONNECTION HANDLING -
+    Wrapper thread to run the game logic and handle post-game cleanup, including recycling players and checking for the next game, and catching exceptions to gracefully end the game.
+
+    Args:
+        player1_data (dict): Data for Player 1.
+        player2_data (dict): Data for Player 2.
+    """
     print(f"[DEBUG] run_game_wrapper started with players {player1_data['id']} and {player2_data['id']}.")
 
     player_ids_in_game = [player1_data['id'], player2_data['id']]
 
-    # Ensure player roles are correctly set for the duration of the game
     with lock:
         p1_client_data = clients.get(player1_data['id'])
         p2_client_data = clients.get(player2_data['id'])
@@ -566,26 +542,22 @@ def run_game_wrapper(player1_data, player2_data):
 
 
     try:
-        # Run the countdown first
         run_game_countdown()
 
-        # Run the actual game logic
         print(f"[DEBUG] Calling run_multiplayer_game...")
         run_multiplayer_game(
             player1_data,
             player2_data,
-            player1_data.get("input_queue"), # Pass the input queue for Player 1
-            player2_data.get("input_queue"), # Pass the input queue for Player 2
-            send_message_to_client, # Pass the server's send function
-            broadcast_game_board_state # Pass the server's board broadcast function
+            player1_data.get("input_queue"),
+            player2_data.get("input_queue"),
+            send_message_to_client,
+            broadcast_game_board_state
         )
         print(f"[DEBUG] run_multiplayer_game finished without exception.")
 
     except PlayerDisconnectedException as e:
          print(f"[GAME INFO] Game ended due to player disconnection: {e}")
-         # The handle_client_input thread already called remove_client.
-         # Notify remaining player if any.
-         disconnected_player_id = None # Need to determine which player disconnected
+         disconnected_player_id = None
          if str(e).startswith(player1_data['id']): disconnected_player_id = player1_data['id']
          elif str(e).startswith(player2_data['id']): disconnected_player_id = player2_data['id']
 
@@ -596,14 +568,13 @@ def run_game_wrapper(player1_data, player2_data):
          if remaining_player_id:
              try:
                  send_message_to_client(remaining_player_id, f"[SYSTEM] Your opponent disconnected. Game ending.")
-             except Exception: pass # Ignore errors sending final message
+             except Exception: pass
 
          broadcast_to_all(f"[SYSTEM] The game has ended because a player disconnected.", sender_id=remaining_player_id)
 
 
     except PlayerTimeoutException as e:
          print(f"[GAME INFO] Game ended due to player timeout/forfeit: {e}")
-         # Game logic already sent forfeit messages, just broadcast general end message.
          broadcast_to_all(f"[SYSTEM] The game has ended because a player timed out/forfeited.")
 
     except Exception as e:
@@ -613,24 +584,31 @@ def run_game_wrapper(player1_data, player2_data):
         print(f"[DEBUG] Game execution finished or errored. Starting cleanup.")
         with lock:
             game_in_progress = False
-            game_thread = None # Clear the game thread reference
+            game_thread = None
             print(f"[DEBUG] game_in_progress set to {game_in_progress}.")
 
-        time.sleep(1) # Give a moment for final messages/cleanup
+        time.sleep(1)
 
         print(f"[DEBUG] Recycling players {player_ids_in_game}.")
         recycle_players_to_spectators(player_ids_in_game)
         print(f"[DEBUG] Running garbage collection.")
         gc.collect()
-        print(f"[DEBUG] Broadcasting preparation for next match.")
         broadcast_to_all("[SYSTEM] The current game has ended. Preparing for the next match...")
 
         print(f"[DEBUG] Checking if next game can start.")
-        check_start_game() # Check if there are enough players for the next game
+        check_start_game()
 
 
 def main():
-    """Main function to start the server."""
+    """
+    TIER 1.1 CONCURRENCY ISSUES, TIER 1.2 SERVER AND TWO CLIENTS,
+    TIER 2.4 DISCONNECTION HANDLING, TIER 3.1 MULTIPLE CONCURRENT CONNECTIONS,
+    TIER 4.4 SECURITY FLAWS & MITIGATIONS -
+    Main function to set up the server socket, accept connections,
+    manage connection limits, assign roles (player/spectator),
+    and start threads for each client to handle their input.
+    Also triggers checks for starting new games.
+    """
     print(f"[INFO] Server listening on {HOST}:{PORT}")
     print(f"[DEBUG] main function started.")
     server_socket = None
@@ -652,11 +630,9 @@ def main():
 
 
                 with lock:
-                    # --- Connection Limit Check ---
                     if len(clients) >= MAX_CONNECTIONS:
                         print(f"[INFO] Connection from {addr} refused. Max connections ({MAX_CONNECTIONS}) reached.")
                         try:
-                            # Attempt to send a message before closing
                             temp_wfile = conn.makefile('w')
                             temp_wfile.write(f"[SYSTEM] Connection refused: Maximum connections ({MAX_CONNECTIONS}) reached. Please try again later.\n")
                             temp_wfile.flush()
@@ -664,11 +640,11 @@ def main():
                         except Exception as e:
                             print(f"[ERROR] Error sending refusal message to {addr}: {e}")
                         finally:
-                            conn.close() # Ensure the socket is closed
-                        continue # Skip to the next accept loop iteration
+                            conn.close()
+                        continue
 
 
-                client_id = f"Client-{addr[0]}:{addr[1]}-{time.time()}" # Unique ID including timestamp
+                client_id = f"Client-{addr[0]}:{addr[1]}-{time.time()}"
                 print(f"[INFO] Connection established with {addr}, assigned ID {client_id}")
                 print(f"[DEBUG] Accepted connection. Setting up client data.")
 
@@ -676,13 +652,11 @@ def main():
                 wfile = conn.makefile('w')
 
                 with lock:
-                    # Determine role (player or spectator)
-                    role = "spectator" # Default to spectator
+                    role = "spectator"
                     if len(players_waiting) < 2 and not game_in_progress:
                         role = "player"
                         players_waiting.append(client_id)
                         print(f"[DEBUG] {client_id} added to players_waiting.")
-                        # Input queue for players is created when they are promoted to a game
 
                     else:
                         spectators_waiting.append(client_id)
@@ -691,36 +665,33 @@ def main():
                     clients[client_id] = {
                         "r": rfile,
                         "w": wfile,
-                        "socket": conn, # Store socket for potential direct closing on removal
+                        "socket": conn,
                         "addr": addr,
                         "id": client_id,
                         "role": role,
-                        "input_queue": None, # Input queue is created only when promoted to an active player in a game
-                        "last_input_time": time.time() # Initialize last input time
+                        "input_queue": None,
+                        "last_input_time": time.time()
                     }
                     print(f"[DEBUG] Client data stored for {client_id} with role {role}. Total clients: {len(clients)}")
 
 
-                # Start a dedicated thread to handle input from this client
                 threading.Thread(target=handle_client_input, args=(client_id,), daemon=True).start()
                 print(f"[DEBUG] handle_client_input thread started for {client_id}")
 
-                # Send initial welcome message
                 welcome_message = f"[SYSTEM] Welcome! Your ID is {client_id}.\n"
-                with lock: # Access waiting lists under lock for accurate position
+                with lock:
                     if role == "player":
-                         position_in_queue = players_waiting.index(client_id) + 1 if client_id in players_waiting else -1 # Should be in list
+                         position_in_queue = players_waiting.index(client_id) + 1 if client_id in players_waiting else -1
                          if position_in_queue != -1:
                              welcome_message += f"[SYSTEM] You are #{position_in_queue} in the player queue.\n"
                          welcome_message += f"[SYSTEM] Waiting for another player to join...\n"
-                    else: # Spectator
-                         # Find position in the combined queue for initial message
+                    else:
                          combined_queue = players_waiting + spectators_waiting
                          position = -1
                          try:
                              position = combined_queue.index(client_id) + 1
-                         except ValueError: # Should not happen
-                              pass # Keep position as -1
+                         except ValueError:
+                              pass
 
                          if position != -1:
                             welcome_message += f"[SYSTEM] You are Spectator #{position} in the queue.\n"
@@ -732,17 +703,14 @@ def main():
                 send_message_to_client(client_id, welcome_message)
                 send_message_to_client(client_id, "[SYSTEM] Type /help for available commands.")
 
-
-                # Check if a new game can start after a new client connects
                 check_start_game()
 
 
             except KeyboardInterrupt:
                 print(f"[INFO] Server shutting down due to KeyboardInterrupt.")
-                break # Exit the loop on Ctrl+C
+                break
             except Exception as e:
                 print(f"[ERROR] Error accepting connection: {e}")
-                # Continue listening even if one connection fails
 
     except Exception as e:
         print(f"[CRITICAL ERROR] Server failed to start or run: {e}")
@@ -752,13 +720,12 @@ def main():
             server_socket.close()
             print("[INFO] Server socket closed.")
 
-        # Attempt to clean up all client connections
         client_ids_to_close = []
         with lock:
              client_ids_to_close = list(clients.keys())
         for client_id in client_ids_to_close:
             print(f"[INFO] Cleaning up resources for client {client_id} during shutdown.")
-            remove_client(client_id) # This handles closing files and socket
+            remove_client(client_id)
 
         print(f"[INFO] Server has shut down.")
 
