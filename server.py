@@ -11,7 +11,8 @@ HOST = '127.0.0.1'
 PORT = 5001
 
 # Global server state
-clients = {} # {client_id: {"r": rfile, "w": wfile, "addr": addr, "id": client_id, "role": "player" or "spectator", "input_queue": queue.Queue() if player}}
+# Added 'last_input_time' to client data for input rate limiting
+clients = {} # {client_id: {"r": rfile, "w": wfile, "addr": addr, "id": client_id, "role": "player" or "spectator", "input_queue": queue.Queue() if player, "last_input_time": float, "socket": socket_obj}}
 players_waiting = [] # List of client_ids waiting for a game
 spectators_waiting = [] # List of client_ids waiting for a game or spectating
 game_in_progress = False
@@ -19,6 +20,11 @@ game_thread = None # Thread for the current game instance
 lock = threading.RLock() # Lock for accessing shared server state
 
 GAME_START_COUNTDOWN = 5  # seconds
+
+# --- Rate Limiting and Connection Limits ---
+MAX_CONNECTIONS = 6
+INPUT_RATE_LIMIT_PER_SECOND = 2
+INPUT_RATE_DELAY = 1.0 / INPUT_RATE_LIMIT_PER_SECOND
 
 print(f"[DEBUG] Initializing server with HOST: {HOST}, PORT: {PORT}")
 
@@ -209,18 +215,20 @@ def handle_client_input(client_id):
 
             print(f"[DEBUG] Received from {client_id}: '{line}'")
 
-            # Get current role, game state, and queue under the lock for each input
-            current_role = None
-            player_input_queue = None
-            current_game_in_progress = False
+            # --- Input Rate Limiting Check ---
+            current_time = time.time()
             with lock:
                 client_data = clients.get(client_id)
-                if client_data:
-                    current_role = client_data.get("role")
-                    # Get the queue object if it exists and the client is intended to be a player
-                    if current_role == "player":
-                        player_input_queue = client_data.get("input_queue")
+                if client_data: # Ensure client data still exists
+                    time_since_last_input = current_time - client_data['last_input_time']
+                    if time_since_last_input < INPUT_RATE_DELAY:
+                        send_message_to_client(client_id, "[SYSTEM] Input rate limit exceeded. Slow down.")
+                        continue # Ignore this input and wait for the next one
+                    client_data['last_input_time'] = current_time # Update last input time
 
+                # Get current role, game state, and queue under the lock after rate limit check
+                current_role = client_data.get("role") if client_data else None
+                player_input_queue = client_data.get("input_queue") if client_data else None
                 current_game_in_progress = game_in_progress # Get the global game state
 
 
@@ -230,6 +238,7 @@ def handle_client_input(client_id):
             else:
                 # It's not a command. Could be a game move or chat.
                 # Use the state retrieved under the lock
+                # Ensure client_data still exists and role is player and game is active
                 if current_role == "player" and current_game_in_progress and player_input_queue:
                     # If it's a player in an active game AND they have an input queue,
                     # put the input into their queue for the game logic to process.
@@ -428,6 +437,7 @@ def promote_spectators_to_players():
                 if client_data:
                     client_data["role"] = "player"
                     client_data["input_queue"] = queue.Queue() # Create a new input queue for the game
+                    # last_input_time already exists from when they connected
                     print(f"[DEBUG] Promoted {player_id} to player role and assigned new queue.")
                 else:
                     print(f"[ERROR] Promoted client {player_id} not found in clients dict during role update.")
@@ -639,6 +649,25 @@ def main():
             print(f"[DEBUG] Waiting for a new connection...")
             try:
                 conn, addr = server_socket.accept()
+
+
+                with lock:
+                    # --- Connection Limit Check ---
+                    if len(clients) >= MAX_CONNECTIONS:
+                        print(f"[INFO] Connection from {addr} refused. Max connections ({MAX_CONNECTIONS}) reached.")
+                        try:
+                            # Attempt to send a message before closing
+                            temp_wfile = conn.makefile('w')
+                            temp_wfile.write(f"[SYSTEM] Connection refused: Maximum connections ({MAX_CONNECTIONS}) reached. Please try again later.\n")
+                            temp_wfile.flush()
+                            temp_wfile.close()
+                        except Exception as e:
+                            print(f"[ERROR] Error sending refusal message to {addr}: {e}")
+                        finally:
+                            conn.close() # Ensure the socket is closed
+                        continue # Skip to the next accept loop iteration
+
+
                 client_id = f"Client-{addr[0]}:{addr[1]}-{time.time()}" # Unique ID including timestamp
                 print(f"[INFO] Connection established with {addr}, assigned ID {client_id}")
                 print(f"[DEBUG] Accepted connection. Setting up client data.")
@@ -666,7 +695,8 @@ def main():
                         "addr": addr,
                         "id": client_id,
                         "role": role,
-                        "input_queue": None # Input queue is created only when promoted to an active player in a game
+                        "input_queue": None, # Input queue is created only when promoted to an active player in a game
+                        "last_input_time": time.time() # Initialize last input time
                     }
                     print(f"[DEBUG] Client data stored for {client_id} with role {role}. Total clients: {len(clients)}")
 
