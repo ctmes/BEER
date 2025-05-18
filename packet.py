@@ -14,24 +14,25 @@ def pack_packet(sequence, packet_type, payload_bytes):
     payload_len = len(payload_bytes)
     header = struct.pack('!HBH', sequence, packet_type, payload_len)
     body = header + payload_bytes
-    checksum = zlib.crc32(body)
-    packet = body + struct.pack('!I', checksum)
+    checksum = sum(body) % 256
+    packet = body + struct.pack('!B', checksum)
     return packet
 
 def unpack_packet(packet_bytes):
-    if len(packet_bytes) < 9:
-        raise ValueError("Packet too short") 
+    if len(packet_bytes) < 6:
+        raise ValueError("Packet too short")
     header = packet_bytes[:5]
     seq, pkt_type, payload_len = struct.unpack('!HBH', header)
-    payload = packet_bytes[5:-4]
-    checksum_recv = struct.unpack('!I', packet_bytes[-4:])[0]
-    body = packet_bytes[:-4]
-    checksum_calc = zlib.crc32(body)
+    payload = packet_bytes[5:-1]
+    checksum_recv = packet_bytes[-1]
+    body = packet_bytes[:-1]
+    checksum_calc = sum(body) % 256
     if checksum_recv != checksum_calc:
         raise ValueError("Checksum mismatch")
     return seq, pkt_type, payload
 
 if __name__ == "__main__":
+    #matching type 
     seq = 1
     pkt_type = USER_INPUT
     payload = b"Hello, world!"
@@ -55,6 +56,31 @@ if __name__ == "__main__":
     except ValueError as e:
         print("Checksum error detected as expected:", e)
 
+    # Simulate sending 5 packets with incrementing sequence numbers
+    packets = []
+    for seq in range(1, 6):
+        pkt = pack_packet(seq, USER_INPUT, f"Message {seq}".encode())
+        packets.append(pkt)
+
+    # Simulate out-of-order delivery by shuffling the packets
+    import random
+    shuffled_packets = packets[:]
+    random.shuffle(shuffled_packets)
+    print("Packet receive order (sequence numbers):", [unpack_packet(p)[0] for p in shuffled_packets])
+
+    # Simulate receiver expecting packets in order
+    expected_seq = 1
+    for p in shuffled_packets:
+        try:
+            seq, pkt_type, payload = unpack_packet(p)
+            if seq == expected_seq:
+                print(f"Received expected packet {seq}: {payload.decode()}")
+                expected_seq += 1
+            else:
+                print(f"Out-of-sequence packet! Expected {expected_seq}, got {seq}. Discarding.")
+        except ValueError as e:
+            print("Corrupted packet detected:", e)
+
 
 # Packet Structure:
 # sequence number
@@ -72,3 +98,4 @@ if __name__ == "__main__":
 #6	ERROR	            Error or invalid packet notification
 #7	ACK	Acknowledgement (optional, for reliability)
 
+#"byte sum" or "additive checksum" instead of CRC32 from library
