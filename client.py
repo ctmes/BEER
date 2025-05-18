@@ -63,6 +63,12 @@ def main():
         rfile = sock.makefile('r')
         wfile = sock.makefile('w')
 
+        # --- Prompt for username and send it to the server ---
+        username = input("Enter your username: ")
+        wfile.write(username + '\n')
+        wfile.flush()
+        # -----------------------------------------------------
+
         # Start the message receiver thread
         receiver = threading.Thread(target=receive_messages, args=(rfile,), daemon=True)
         receiver.start()

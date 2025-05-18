@@ -168,17 +168,18 @@ def parse_coordinate(coord_str):
     return (row, col)
 
 
-def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2, spectators):
+def run_multiplayer_game(username1, rfile1, wfile1, username2, rfile2, wfile2, spectators, mark_player_disconnected, active_games):
     player_files = {
-        "Player 1": {"r": rfile1, "w": wfile1},
-        "Player 2": {"r": rfile2, "w": wfile2}
+        username1: {"r": rfile1, "w": wfile1},
+        username2: {"r": rfile2, "w": wfile2}
     }
-    player_boards = {"Player 1": Board(BOARD_SIZE), "Player 2": Board(BOARD_SIZE)}
+
+    player_boards = {username1: Board(BOARD_SIZE), username2: Board(BOARD_SIZE)}
 
     # Track the last activity time for each player
     player_last_activity = {
-        "Player 1": time.time(),
-        "Player 2": time.time()
+        username1: time.time(),
+        username2: time.time()
     }
 
     # --- Network Helper Functions (defined inside to close over player_files) ---
@@ -188,51 +189,33 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2, spectators):
             wfile.write(message + '\n')
             wfile.flush()
         except (socket.error, BrokenPipeError, ConnectionResetError) as e:
+            print(f"[DEBUG] BATTLESHIP.PY: run_multiplayer_game: Detected disconnect on send for {player_tag}")
             raise PlayerDisconnectedException(f"{player_tag} disconnected (send error: {e})")
 
     def recv_msg_from_player(player_tag, timeout=INACTIVITY_TIMEOUT):
         rfile = player_files[player_tag]["r"]
+        result = {"data": None, "exception": None}
 
-        # Create a flag for the timeout
-        timeout_flag = {"occurred": False}
-        result = {"data": None}
-
-        # Define a function for the thread to execute
         def read_input():
             try:
                 line = rfile.readline()
                 if not line:
-                    raise PlayerDisconnectedException(f"{player_tag} disconnected (EOF on read)")
+                    print(f"[DEBUG] BATTLESHIP.PY: run_multiplayer_game: Detected disconnect on recv for {player_tag}")
+                    result["exception"] = PlayerDisconnectedException(f"{player_tag} disconnected (EOF on read)")
+                    return
                 result["data"] = line.strip()
-                # Update last activity time when we get valid input
                 player_last_activity[player_tag] = time.time()
-            except UnicodeDecodeError as e:
-                raise PlayerDisconnectedException(f"{player_tag} sent invalid data (decode error: {e}), assuming disconnect.")
-            except (socket.error, ConnectionResetError) as e:
-                raise PlayerDisconnectedException(f"{player_tag} disconnected (read error: {e})")
+            except Exception as e:
+                result["exception"] = e
 
-        # Create and start the reader thread
-        reader_thread = threading.Thread(target=read_input)
-        reader_thread.daemon = True
-        reader_thread.start()
-
-        # Wait for the thread to complete or timeout
-        reader_thread.join(timeout)
-
-        # Check if the thread is still alive (meaning timeout occurred)
-        if reader_thread.is_alive():
-            timeout_flag["occurred"] = True
-            # We don't want to wait forever, but we can't just interrupt the thread
-            # The thread will eventually complete when input is received or connection fails
-            # But we can proceed with the game by raising a timeout exception
-            raise PlayerTimeoutException(f"{player_tag} timed out after {timeout} seconds")
-
-        # If we get here, the thread completed within the timeout
-        if result["data"] is not None:
-            return result["data"]
-        else:
-            # This should not happen if the read_input function is working correctly
-            raise PlayerDisconnectedException(f"{player_tag} connection resulted in null data")
+        thread = threading.Thread(target=read_input)
+        thread.start()
+        thread.join(timeout)
+        if thread.is_alive():
+            raise PlayerTimeoutException(f"{player_tag} timed out")
+        if result["exception"]:
+            raise result["exception"]
+        return result["data"]
 
     def send_board_to_player(player_tag, board_to_send, show_hidden=False):
         wfile = player_files[player_tag]["w"]
@@ -315,8 +298,8 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2, spectators):
 
     def send_both_boards_to_spectators(spectators):
         # Get both player boards
-        board_p1 = player_boards["Player 1"]
-        board_p2 = player_boards["Player 2"]
+        board_p1 = player_boards[username1]
+        board_p2 = player_boards[username2]
 
         # Prepare the board display strings
         p1_grid = board_p1.display_grid
@@ -362,22 +345,24 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2, spectators):
                 place_ships_for_player(p_tag_worker)
                 placement_status[p_tag_worker] = "success"
             except PlayerDisconnectedException as e_disconnect:
+                print(f"[DEBUG] placement_worker: PlayerDisconnectedException caught in placement_worker for {p_tag_worker}: {e_disconnect}")
                 placement_status[p_tag_worker] = e_disconnect
                 e_main_handler = e_disconnect  # Store first disconnect during placement
             except PlayerTimeoutException as e_timeout:
+                print(f"[DEBUG] placement_worker: PlayerTimeoutException caught in placement_worker for {p_tag_worker}: {e_timeout}")
                 # If a player times out during placement, we'll treat it as a disconnect
                 custom_disconnect_exception = PlayerDisconnectedException(
                     f"{p_tag_worker} timed out during ship placement and forfeited")
                 placement_status[p_tag_worker] = custom_disconnect_exception
                 e_main_handler = custom_disconnect_exception
             except Exception as e_other:
-                print(f"[ERROR] Unexpected critical error in {p_tag_worker} placement thread: {e_other}")
+                print(f"[ERROR] placement_worker: Unexpected critical error in {p_tag_worker} placement thread: {e_other}")
                 custom_disconnect_exception = PlayerDisconnectedException(
                     f"{p_tag_worker} had a critical error during placement: {e_other}")
                 placement_status[p_tag_worker] = custom_disconnect_exception
                 e_main_handler = custom_disconnect_exception
 
-        for p_tag_for_thread in ["Player 1", "Player 2"]:
+        for p_tag_for_thread in [username1, username2]:
             thread = threading.Thread(target=placement_worker, args=(p_tag_for_thread,))
             placement_threads.append(thread)
             thread.start()
@@ -385,7 +370,7 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2, spectators):
             thread.join()  # Wait for both placement threads to complete
 
         # Check results of placement
-        for p_tag_check in ["Player 1", "Player 2"]:
+        for p_tag_check in [username1, username2]:
             status = placement_status.get(p_tag_check)
             if isinstance(status, PlayerDisconnectedException):
                 raise status  # Propagate the first PlayerDisconnectedException from placement
@@ -393,61 +378,64 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2, spectators):
                 raise PlayerDisconnectedException(f"{p_tag_check} failed ship placement unexpectedly (status: {status}).")
 
         # If placement successful for both:
-        send_msg_to_player("Player 1", "\nBoth players have placed ships. The battle begins!")
-        send_msg_to_player("Player 2", "\nBoth players have placed ships. The battle begins!")
+        send_msg_to_player(username1, "\nBoth players have placed ships. The battle begins!")
+        send_msg_to_player(username2, "\nBoth players have placed ships. The battle begins!")
         send_both_boards_to_spectators(spectators)
         broadcast_to_spectators(spectators, "Game has started!")
 
         # --- Main Game Loop (Turns) ---
         turn_count = 0
-        timeout_count = {"Player 1": 0, "Player 2": 0}  # Track consecutive timeouts
+        timeout_count = {username1: 0, username2: 0}  # Track consecutive timeouts
         MAX_TIMEOUTS = 2  # Maximum number of consecutive timeouts before forfeit
 
         while game_active:
-            current_player_tag = "Player 1" if turn_count % 2 == 0 else "Player 2"
-            opponent_player_tag = "Player 2" if turn_count % 2 == 0 else "Player 1"
-
-            target_board = player_boards[opponent_player_tag]  # The board being fired upon
-
-            # Send turn information to both players
-            send_msg_to_player(current_player_tag, f"\n--- {current_player_tag}, it's your turn! ---")
-            send_msg_to_player(current_player_tag, f"Your view of {opponent_player_tag}'s board:")
-            send_board_to_player(current_player_tag, target_board, show_hidden=False)  # Show display grid of opponent
-
-            # Timeout notification
-            send_msg_to_player(current_player_tag, f"You have {INACTIVITY_TIMEOUT} seconds to make your move.")
-
-            # Inform the opponent they're waiting for the current player's move
-            send_msg_to_player(opponent_player_tag, f"\nWaiting for {current_player_tag} to make a move...")
-
             try:
-                # Ask current player for their move
+                print(f"[DEBUG] BATTLESHIP.PY: run_multiplayer_game: Entered main game loop try block for turn {turn_count}")
+                current_player_tag = username1 if turn_count % 2 == 0 else username2
+                opponent_player_tag = username2 if turn_count % 2 == 0 else username1
+                target_board = player_boards[opponent_player_tag]
+
+                # --- Ping both players to detect disconnects early ---
+                try:
+                    send_msg_to_player(current_player_tag, "[PING]")  # Detect if current player disconnected
+                except PlayerDisconnectedException as e:
+                    print(f"[DEBUG] BATTLESHIP.PY: run_multiplayer_game: Detected disconnect on ping for {current_player_tag}")
+                    raise
+
+                try:
+                    send_msg_to_player(opponent_player_tag, "[PING]")  # Detect if waiting player disconnected
+                except PlayerDisconnectedException as e:
+                    print(f"[DEBUG] BATTLESHIP.PY: run_multiplayer_game: Detected disconnect on ping for {opponent_player_tag}")
+                    raise
+
+                # --- All network and game logic for the turn is inside this try! ---
+                send_msg_to_player(current_player_tag, f"\n--- {current_player_tag}, it's your turn! ---")
+                send_msg_to_player(current_player_tag, f"Your view of {opponent_player_tag}'s board:")
+                send_board_to_player(current_player_tag, target_board, show_hidden=False)
+                send_msg_to_player(current_player_tag, f"You have {INACTIVITY_TIMEOUT} seconds to make your move.")
+                send_msg_to_player(opponent_player_tag, f"\nWaiting for {current_player_tag} to make a move...")
+
                 send_msg_to_player(current_player_tag, "Enter coordinate to fire (e.g., A1) or type 'quit' to exit:")
                 guess_input = recv_msg_from_player(current_player_tag)
 
-                # Reset timeout counter for this player since they responded
                 timeout_count[current_player_tag] = 0
 
-                # Check if the player wants to quit
                 if guess_input.lower() == 'quit':
-                    game_active = False  # Mark game as ended
+                    game_active = False
                     quitting_player = current_player_tag
                     other_player = opponent_player_tag
                     print(f"[GAME INFO] {quitting_player} has chosen to quit.")
 
-                    # Fix: Send a clearer message to both players
                     try:
                         send_msg_to_player(quitting_player, f"You have chosen to quit the game. Game over.")
-                    except PlayerDisconnectedException:  # Quitter already gone
+                    except PlayerDisconnectedException:
                         print(f"[GAME INFO] {quitting_player} (who was quitting) already disconnected.")
 
                     try:
-                        # Fix: Send a clearer message to the other player
                         send_msg_to_player(other_player, f"\n{quitting_player} has chosen to quit the game. Game over.")
-                    except PlayerDisconnectedException:  # Opponent already gone
+                    except PlayerDisconnectedException:
                         print(f"[GAME INFO] Opponent {other_player} was already disconnected when {quitting_player} quit.")
 
-                    # Exit the game loop
                     break
 
                 row, col = parse_coordinate(guess_input)
@@ -462,7 +450,6 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2, spectators):
                         msg_for_active_player += f"HIT! You sank their {sunk_ship}!"
                         msg_for_opponent += f"HIT! Your {sunk_ship} has been SUNK!"
                         broadcast_to_spectators(spectators, f"{current_player_tag} sunked {opponent_player_tag}'s {sunk_ship}!")
-                        
                     else:
                         msg_for_active_player += "HIT!"
                         msg_for_opponent += "HIT on one of your ships!"
@@ -481,13 +468,11 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2, spectators):
                 send_msg_to_player(current_player_tag, msg_for_active_player)
                 send_msg_to_player(opponent_player_tag, msg_for_opponent)
 
-                # After a shot, show the opponent their updated board
                 send_msg_to_player(opponent_player_tag, f"\n{opponent_player_tag}'s board after {current_player_tag}'s shot:")
-                send_board_to_player(opponent_player_tag, target_board, show_hidden=True)  # Show their own board (can see their ships)
-                
+                send_board_to_player(opponent_player_tag, target_board, show_hidden=True)
 
                 if target_board.all_ships_sunk():
-                    game_active = False  # Mark game as ended
+                    game_active = False
                     final_win_msg = f"GAME OVER! {current_player_tag} WINS! All {opponent_player_tag}'s ships are sunk."
                     send_msg_to_player(current_player_tag, final_win_msg)
                     send_msg_to_player(current_player_tag, f"\nFinal state of {opponent_player_tag}'s board (what you saw):")
@@ -496,16 +481,16 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2, spectators):
                     send_msg_to_player(opponent_player_tag, final_win_msg)
                     send_msg_to_player(opponent_player_tag, f"\nYour final board state (all ships shown):")
                     send_board_to_player(opponent_player_tag, target_board, show_hidden=True)
-                    break  # Exit the 'while game_active:' loop
+                    break
+
+                turn_count += 1
 
             except PlayerTimeoutException:
-                # Handle timeout: increment counter and notify players
+                print("[DEBUG] BATTLESHIP.PY: run_multiplayer_game: caught PlayerTimeoutException in main game loop")
                 timeout_count[current_player_tag] += 1
-
                 timeout_msg = f"{current_player_tag} did not respond within {INACTIVITY_TIMEOUT} seconds. "
 
                 if timeout_count[current_player_tag] >= MAX_TIMEOUTS:
-                    # Player has timed out MAX_TIMEOUTS times in a row, they forfeit
                     forfeit_msg = f"{current_player_tag} has forfeited the game due to {MAX_TIMEOUTS} consecutive timeouts."
                     print(f"[GAME INFO] {forfeit_msg}")
 
@@ -513,18 +498,17 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2, spectators):
                         send_msg_to_player(current_player_tag,
                                           f"You have forfeited the game due to {MAX_TIMEOUTS} consecutive timeouts. Game over.")
                     except PlayerDisconnectedException:
-                        pass  # Player may have disconnected
+                        pass
 
                     try:
                         send_msg_to_player(opponent_player_tag,
                                           f"\n{forfeit_msg} You win!")
                     except PlayerDisconnectedException:
-                        pass  # Other player may have disconnected
+                        pass
 
                     game_active = False
                     break
                 else:
-                    # This is not their MAX_TIMEOUTS timeout, so just skip their turn
                     timeout_msg += f"Turn skipped ({timeout_count[current_player_tag]}/{MAX_TIMEOUTS} strikes)."
                     print(f"[GAME INFO] {timeout_msg}")
 
@@ -533,7 +517,6 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2, spectators):
                                           f"You did not respond in time. Your turn has been skipped. "
                                           f"Warning: {timeout_count[current_player_tag]}/{MAX_TIMEOUTS} timeouts.")
                     except PlayerDisconnectedException:
-                        # If we can't reach the player who timed out, they might have disconnected
                         raise PlayerDisconnectedException(f"{current_player_tag} disconnected after timeout")
 
                     try:
@@ -541,46 +524,96 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2, spectators):
                                           f"\n{current_player_tag} did not respond in time. Their turn has been skipped. "
                                           f"Warning: They have {timeout_count[current_player_tag]}/{MAX_TIMEOUTS} timeouts.")
                     except PlayerDisconnectedException:
-                        # If we can't reach the other player, they might have disconnected
                         raise PlayerDisconnectedException(f"{opponent_player_tag} disconnected during opponent timeout handling")
 
-            except ValueError as e_parse_fire:  # From parse_coordinate or fire_at (if it raises one)
+            except ValueError as e_parse_fire:
+                print("[DEBUG] BATTLESHIP.PY: run_multiplayer_game: caught ValueError in main game loop")
                 send_msg_to_player(current_player_tag, f"[!] Invalid move input ('{guess_input}'): {e_parse_fire}. Please try again this turn.")
-                # Player does not lose turn for bad input formatting.
-                continue  # Skip the turn increment to let this player try again
+                continue
 
-            # Advance to next turn
-            turn_count += 1
+            except (ConnectionResetError, BrokenPipeError, OSError, PlayerDisconnectedException) as e_disconnect_main:
+                print(f"[DEBUG] BATTLESHIP.PY: run_multiplayer_game: caught PlayerDisconnectedException in main game loop: {e_disconnect_main}")
+                disconnected_msg_detail = str(e_disconnect_main)
+                disconnected_player = None
+                remaining_player = None
 
+                if username1 in disconnected_msg_detail:
+                    disconnected_player = username1
+                    remaining_player = username2
+                elif username2 in disconnected_msg_detail:
+                    disconnected_player = username2
+                    remaining_player = username1
+                else:
+                    # Fallback: use current_player_tag
+                    disconnected_player = current_player_tag
+                    remaining_player = opponent_player_tag
+
+                if disconnected_player:
+                    print(f"[DEBUG] BATTLESHIP.PY: run_multiplayer_game: Marking {disconnected_player} as disconnected")
+                    mark_player_disconnected(disconnected_player, active_games)
+
+                if remaining_player:
+                    try:
+                        notification_msg = (
+                            f"\nPlayer '{disconnected_player}' disconnected. Waiting up to 20 seconds for reconnection..."
+                        )
+                        send_msg_to_player(remaining_player, notification_msg)
+                        broadcast_to_spectators(spectators, notification_msg)
+                    except PlayerDisconnectedException:
+                        pass
+
+                RECONNECT_TIMEOUT = 30
+                reconnect_deadline = time.time() + RECONNECT_TIMEOUT
+
+                reconnected = False
+                while time.time() < reconnect_deadline:
+                    if disconnected_player in active_games and not active_games[disconnected_player].get("disconnected", True):
+                        try:
+                            print(f"[DEBUG] BATTLESHIP.PY: run_multiplayer_game: {disconnected_player} has reconnected, resuming game")
+                            if remaining_player:
+                                send_msg_to_player(remaining_player, f"Player '{disconnected_player}' has reconnected! Resuming game.")
+                                broadcast_to_spectators(spectators, f"Player '{disconnected_player}' has reconnected! Game resuming.")
+                        except Exception:
+                            pass
+                        player_files[disconnected_player]["r"] = active_games[disconnected_player]["rfile"]
+                        player_files[disconnected_player]["w"] = active_games[disconnected_player]["wfile"]
+                        print(f"[DEBUG] BATTLESHIP.PY: run_multiplayer_game: Updated file handles for {disconnected_player}")
+
+                        send_msg_to_player(disconnected_player, "You have reconnected! Here is your current board:")
+                        send_board_to_player(disconnected_player, player_boards[disconnected_player], show_hidden=True)
+                        reconnected = True
+                        break
+                    else:
+                        if disconnected_player in active_games:
+                            print(f"[DEBUG] BATTLESHIP.PY: run_multiplayer_game: Waiting for {disconnected_player} to reconnect. disconnected={active_games[disconnected_player].get('disconnected', True)}")
+                        else:
+                            print(f"[DEBUG] BATTLESHIP.PY: run_multiplayer_game: Waiting for {disconnected_player} to reconnect. Not in active_games.")
+                    time.sleep(1)
+
+                if not reconnected:
+                    if remaining_player:
+                        try:
+                            send_msg_to_player(remaining_player, "Opponent failed to reconnect in time. You win by forfeit.")
+                            broadcast_to_spectators(spectators, "Opponent failed to reconnect in time. Game over.")
+                        except Exception:
+                            pass
+                    e_main_handler = e_disconnect_main
+                    game_active = False
+                else:
+                    print(f"[DEBUG] BATTLESHIP.PY: run_multiplayer_game: Reconnection successful, continuing game loop")
+                    continue
     except PlayerDisconnectedException as e_disconnect_main:
-        e_main_handler = e_disconnect_main  # Store the exception for finally block
+        print(f"[DEBUG] BATTLESHIP.PY: run_multiplayer_game: Last resort disconnect handling")
+        print(f"[INFO] Player disconnected outside main loop: {e_disconnect_main}")
+        e_main_handler = e_disconnect_main
         game_active = False
-        disconnected_msg_detail = str(e_disconnect_main)
-        print(f"[GAME INFO] A player disconnected: {disconnected_msg_detail}. Game ending.")
-
-        # Determine which player is remaining to notify
-        # The disconnected_msg_detail usually starts with "Player X disconnected..."
-        remaining_player = None
-        if "Player 1" in disconnected_msg_detail: remaining_player = "Player 2"
-        elif "Player 2" in disconnected_msg_detail: remaining_player = "Player 1"
-
-        if remaining_player:
-            try:
-                # Fix: Provide a clearer message to the remaining player
-                notification_msg = f"\nThe game has ended because your opponent disconnected or quit."
-                send_msg_to_player(remaining_player, notification_msg)
-            except PlayerDisconnectedException:
-                print(f"[GAME INFO] {remaining_player} also disconnected or unreachable while notifying of opponent's disconnect.")
-        else:
-            print(f"[GAME INFO] Could not reliably determine remaining player to notify from message: {disconnected_msg_detail}")
-
     except Exception as e_critical:
         e_critical_main = e_critical  # Store for finally
         game_active = False
         print(f"[CRITICAL ERROR in run_multiplayer_game] Type: {type(e_critical)}, Error: {e_critical}")
         # Attempt to notify both players if a very unexpected error occurs
         critical_error_msg = "A critical server error occurred in the game. The game has to end."
-        for p_tag_crit_notify in ["Player 1", "Player 2"]:
+        for p_tag_crit_notify in [username1, username2]:
             try: send_msg_to_player(p_tag_crit_notify, critical_error_msg)
             except: pass  # Best effort notification
 
@@ -599,7 +632,7 @@ def run_multiplayer_game(rfile1, wfile1, rfile2, wfile2, spectators):
             final_goodbye_msg = "The game has ended. Thank you for playing Battleship!"
 
         # Send the final goodbye message to both players
-        for p_tag_final_cleanup in ["Player 1", "Player 2"]:
+        for p_tag_final_cleanup in [username1, username2]:
             wfile_cleanup = player_files[p_tag_final_cleanup]["w"]
             rfile_cleanup = player_files[p_tag_final_cleanup]["r"]
 
