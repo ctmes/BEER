@@ -484,18 +484,6 @@ def run_multiplayer_game(player1_data, player2_data, p1_input_queue, p2_input_qu
             # Note: turn_count is now incremented either after a successful move or after a timeout.
             # The continue statement handles skipping the increment only for invalid coordinate format.
 
-            # --- Add this to update current turn in active_games ---
-            # (Assumes active_games is imported or passed in; otherwise, use a callback)
-            try:
-                import server  # Only if not already imported at the top
-                with server.lock:
-                    if current_player_id in server.active_games:
-                        server.active_games[current_player_id]["is_current_turn"] = True
-                    if opponent_player_id in server.active_games:
-                        server.active_games[opponent_player_id]["is_current_turn"] = False
-            except Exception as e:
-                print(f"[DEBUG:run_multiplayer_game] Could not update active_games with current turn: {e}")
-
 
     except (PlayerDisconnectedException, Exception) as e_game_end:
          # Catch disconnects or unexpected errors during the main game loop or placement setup
@@ -506,6 +494,14 @@ def run_multiplayer_game(player1_data, player2_data, p1_input_queue, p2_input_qu
     finally:
         print(f"[INFO:run_multiplayer_game] run_multiplayer_game is concluding for players {player1_data['id']} and {player2_data['id']}.")
         # The server wrapper (run_game_wrapper) is responsible for post-game cleanup and signaling.
+
+        try:
+            import server
+            with server.lock:
+                server.active_games[player1_data['id']]["board"] = player_boards[player1_data['id']]
+                server.active_games[player2_data['id']]["board"] = player_boards[player2_data['id']]
+        except Exception as e:
+            print(f"[DEBUG:run_multiplayer_game] Could not sync boards to active_games: {e}")
 
 
 def run_single_player_game_locally(): # For local testing, unchanged

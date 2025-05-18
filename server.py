@@ -41,7 +41,7 @@ RECONNECT_TIMEOUT = 30
 # --- Rate Limiting and Connection Limits ---
 MAX_CONNECTIONS = 6
 INPUT_RATE_LIMIT_PER_SECOND = 10
-INPUT_RATE_DELAY = 0
+INPUT_RATE_DELAY = 1.0 / INPUT_RATE_LIMIT_PER_SECOND
 
 print(f"[DEBUG] SERVER.PY: <module>: Initializing server with HOST: {HOST}, PORT: {PORT}")
 
@@ -486,8 +486,8 @@ def promote_spectators_to_players():
 
                  try:
                     # Inform the new players
-                    send_message_to_client(players_for_game[0], "[SYSTEM] You are Player 1 in the new game. Preparing to start...")
-                    send_message_to_client(players_for_game[1], "[SYSTEM] You are Player 2 in the new game. Preparing to start...")
+                    send_message_to_client(players_for_game[0], f"[SYSTEM] You are {players_for_game[0]} in the new game. Preparing to start...")
+                    send_message_to_client(players_for_game[1], f"[SYSTEM] You are {players_for_game[1]} in the new game. Preparing to start...")
                  except Exception as e:
                      print(f"[ERROR] SERVER.PY: promote_spectators_postions: Error informing new players after promotion: {e}")
                      # If we can't message a new player, they are likely disconnected.
@@ -568,7 +568,7 @@ def check_start_game():
 
             # Initialize active_games for reconnection and per-player state
             active_games[player1_data['id']] = {
-                "board": Board(BOARD_SIZE),
+                "board": None,  # Will be set by run_multiplayer_game
                 "rfile": player1_data["r"],
                 "wfile": player1_data["w"],
                 "disconnected": False,
@@ -576,7 +576,7 @@ def check_start_game():
                 "opponent": player2_data['id'],
             }
             active_games[player2_data['id']] = {
-                "board": Board(BOARD_SIZE),
+                "board": None,  # Will be set by run_multiplayer_game
                 "rfile": player2_data["r"],
                 "wfile": player2_data["w"],
                 "disconnected": False,
