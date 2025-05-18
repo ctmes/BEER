@@ -26,7 +26,7 @@ SHIPS = [
 ]
 
 # Timeout configuration
-INACTIVITY_TIMEOUT = 30  # Seconds before a player's turn is skipped due to inactivity
+INACTIVITY_TIMEOUT = 500  # Seconds before a player's turn is skipped due to inactivity
 
 
 class PlayerDisconnectedException(Exception):
@@ -483,6 +483,18 @@ def run_multiplayer_game(player1_data, player2_data, p1_input_queue, p2_input_qu
 
             # Note: turn_count is now incremented either after a successful move or after a timeout.
             # The continue statement handles skipping the increment only for invalid coordinate format.
+
+            # --- Add this to update current turn in active_games ---
+            # (Assumes active_games is imported or passed in; otherwise, use a callback)
+            try:
+                import server  # Only if not already imported at the top
+                with server.lock:
+                    if current_player_id in server.active_games:
+                        server.active_games[current_player_id]["is_current_turn"] = True
+                    if opponent_player_id in server.active_games:
+                        server.active_games[opponent_player_id]["is_current_turn"] = False
+            except Exception as e:
+                print(f"[DEBUG:run_multiplayer_game] Could not update active_games with current turn: {e}")
 
 
     except (PlayerDisconnectedException, Exception) as e_game_end:
