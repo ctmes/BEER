@@ -4,29 +4,45 @@ This project implements a networked, turn-based Battleship game named "BEER" as 
 ## Project Overview
 The game follows the standard Battleship rules:
 
-- Players secretly place a set of ships on a 10x10 grid.
-- Players take turns "firing" at specific grid coordinates (e.g., B5).
-- The server announces whether each shot is a hit, miss, or sunk a particular ship.
+- Players secretly place a set of ships on a 10x10 grid,
+- Players take turns "firing" at specific grid coordinates (e.g., B5),
+- The server announces whether each shot is a hit, miss, or sunk a ship, and
 - The game ends when one player's entire fleet is destroyed.
-- The project is structured into four tiers of increasing complexity, building from a basic two-player game to advanced features like custom protocols and security.
+  
+The project is structured into four tiers of increasing complexity, building from a basic two-player game to advanced features like custom protocols and security.
 
 ## Files
-- `battleship.py`: This module defines essential constants and gameplay logic which is shared by both the client and the server. It includes the Board class to track ships, hits, etc., coordinate parsing, single-player mode, and multiplayer support.
-- `server.py`: This module implements the game server. It handles client connections, manages game flow, and broadcasts updates. Based on the code content and project tiers, it includes features for multiple concurrent connections, spectator support, timeout handling, and reconnection support.
-- `client.py`: This module implements the game client with a minimal implementation for connecting to the server. It uses threading to separate receiving and sending operations to fix message synchronization issues where server responses appear out of order or prompts show up late.
-- `packet.py`: Defines a custom packet format and includes functions for packing and unpacking packets and receiving data. It incorporates a byte sum checksum for verifying data integrity.
-- `p1.py` and `p2.py`: These modules appear to be simple client scripts designed for testing, sending predefined inputs for ship placement to the server.
+- `battleship.py`: Essential constants and gameplay logic which is shared by both the client and the server. It includes the Board class to track ships, hits, etc., coordinate parsing, single-player mode, and multiplayer support.
+- `server.py`: Implements the game server. It handles client connections, manages game flow, and broadcasts updates. Based on the code content and project tiers, it includes features for multiple concurrent connections, spectator support, timeout handling, and reconnection support.
+- `client.py`: Implements the game client with a minimal implementation for connecting to the server. It uses threading to separate receiving and sending operations to fix message synchronization issues where server responses appear out of order or prompts are late.
+- `packet.py`: A rudimentary custom packet format and includes functions for packing and unpacking packets and receiving data. It incorporates a byte sum checksum for verifying data integrity.
+- `p1.py` and `p2.py`: Simple client scripts designed for testing, sending predefined inputs for ship placement to the server.
 
 
 ## Setup and Running
-1. Ensure you have Python installed
-2. The game server is configured to listen on `127.0.0.1` (localhost) on port `5001`
-3. To run the server: `python server.py`
+1. Make sure you have Python installed
+2. The game server is configured to listen on `127.0.0.1` (localhost) on port `5001` by default
+3. To run the server: `python server.py` (in a terminal)
 4. To run a client: `python client.py` (in a different terminal)
 #### Notes: 
 - The `battleship.py` script can be run directly to play a local, single-player version of Battleship for testing the expected gameplay loop: `python battleship.py`.
+- There must be a minimum of 2 clients connected to play a game
+- Any extra clients are spectators in a lobby that can see both players grids
 
-## Implemented Features (Based on Project Tiers)
+## Commands
+
+Clients can use the following commands by typing them into their terminal and using `/`:
+
+* `/help`: Displays the list of available commands for your current role (player or spectator).
+* `/quit`: Initiates disconnection from the server. If you are a player in an active game, this may be treated as a forfeit (depending on the server's implementation tier).
+* `/chat <message>`: Sends a chat message to all connected participants (players and spectators).
+* `/status`: (Likely available to spectators) Shows your current position in the waiting queue.
+
+## Gameplay
+Players firstly place ships into their grid by specifying the top-left coordinate and an orientation. E.g., the player types "A1" and "H" and repeats until all ships are played. 
+After all ships are placed, simply guess coordinates you want to fire.
+
+## Implemented Features from Tiers
 The implementation described by the files aims to fulfill requirements outlined in the project description:
 
 ### Tier 1: Basic 2-Player Game with Concurrency in BEER 
