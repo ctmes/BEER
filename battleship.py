@@ -163,7 +163,7 @@ class Board:
                 if len(ship['positions']) == 0:
                     return ship['name']  # whole ship is sunk!
                 break
-        return None  # ship was hit but not sunk
+        return None  # ship hit but not sunk
 
     def all_ships_sunk(self):
         if not self.placed_ships:
@@ -175,10 +175,10 @@ class Board:
                 return False
         return True
 
-    def print_display_grid(self, show_hidden_board=False):  # For local testing
+    def print_display_grid(self, show_hidden_board=False):  # For local testtig
         grid_to_print = self.hidden_grid if show_hidden_board else self.display_grid
 
-        # Print column headers (1-10)
+        # Print col headers (1-10)
         print("  " + "".join(str(i + 1).rjust(2) for i in range(self.size)))
 
         # Print each row with label
@@ -191,7 +191,7 @@ class Board:
 def parse_coordinate(coord_str):
     coord_str = coord_str.strip().upper()
 
-    # Basic validation
+    # Basic val
     if len(coord_str) < 2 or len(coord_str) > 3:
         raise ValueError(f"Bad format '{coord_str}'. Should be like A1 or J10.")
 
@@ -208,10 +208,10 @@ def parse_coordinate(coord_str):
         raise ValueError(f"Column part '{col_digits}' isn't a number.")
 
     # Convert to actual row/col numbers
-    col = int(col_digits) - 1  # Humans start at 1, we start at 0
-    row = ord(row_letter) - ord('A')  # A=0, B=1, etc.
+    col = int(col_digits) - 1   #start at 0
+    row = ord(row_letter) - ord('A')
 
-    # Check within board bounds
+    # Check within bounds
     if row < 0 or row >= BOARD_SIZE or col < 0 or col >= BOARD_SIZE:
         raise ValueError(f"Coordinate {row_letter}{int(col_digits)} is outside the board (A1-{chr(ord('A') + BOARD_SIZE - 1)}{BOARD_SIZE}).")
 
@@ -231,18 +231,17 @@ def run_multiplayer_game(player1_data, player2_data, p1_input_queue, p2_input_qu
         send_message_func (callable): Function to send messages to players
         broadcast_board_func (callable): Function to update spectators
     """
-    # Setup player data with shorter names for readability
+    # Setup player shortee names for readability
     player_tags = {player1_data['id']: "Player 1", player2_data['id']: "Player 2"}
     player_ids = {"Player 1": player1_data['id'], "Player 2": player2_data['id']}
     player_boards = {player1_data['id']: Board(BOARD_SIZE), player2_data['id']: Board(BOARD_SIZE)}
     player_queues = {player1_data['id']: p1_input_queue, player2_data['id']: p2_input_queue}
 
-    # --- Helper Functions ---
+    #Helper funcs
     def send_msg_to_player(player_id, message):
         send_message_func(player_id, message)
 
     def send_board_to_player(player_id, board_to_send, show_hidden=False):
-         # Format the board as text and send it to the player
          try:
             grid_to_print = board_to_send.hidden_grid if show_hidden else board_to_send.display_grid
             message_lines = ["GRID"]
@@ -262,7 +261,7 @@ def run_multiplayer_game(player1_data, player2_data, p1_input_queue, p2_input_qu
              # Server should've handled disconnects already
              pass
 
-    # --- Ship Placement Phase ---
+    # put ships down
     def place_ships_for_player(player_id):
         board = player_boards[player_id]
         player_tag = player_tags[player_id]
@@ -344,14 +343,14 @@ def run_multiplayer_game(player1_data, player2_data, p1_input_queue, p2_input_qu
         print(f"[DEBUG] Ship placement done for {player_tag} ({player_id}).")
 
 
-    # --- Main Game Logic ---
+    # main logic
     game_active = True  # Controls main game loop
     timeout_count = {player1_data['id']: 0, player2_data['id']: 0}  # Track timeouts
     MAX_TIMEOUTS = 2  # Forfeit after this many consecutive timeouts
 
 
     try:
-        # --- Set up ship placement threads ---
+        #Set up ship placement threads
         placement_threads = []
         placement_status = {}  # Will hold results of placement
         print("[DEBUG] Starting placement threads.")
@@ -405,18 +404,17 @@ def run_multiplayer_game(player1_data, player2_data, p1_input_queue, p2_input_qu
         broadcast_board_func(player_boards[player1_data['id']], player_boards[player2_data['id']])  # Update spectators
 
 
-        # --- Main Game Loop ---
+        # gameplay loop
         turn_count = 0
         print("[DEBUG] Starting main game turns.")
 
         while game_active:
-            # Figure out whose turn it is
             current_player_id = player1_data['id'] if turn_count % 2 == 0 else player2_data['id']
             opponent_player_id = player2_data['id'] if turn_count % 2 == 0 else player1_data['id']
             current_player_tag = player_tags[current_player_id]
             opponent_player_tag = player_tags[opponent_player_id]
 
-            target_board = player_boards[opponent_player_id]  # Board to shoot at
+            target_board = player_boards[opponent_player_id]
             current_player_queue = player_queues[current_player_id]
 
             print(f"[DEBUG] Turn {turn_count+1}: {current_player_tag}'s turn")
@@ -426,7 +424,7 @@ def run_multiplayer_game(player1_data, player2_data, p1_input_queue, p2_input_qu
             send_msg_to_player(current_player_id, f"[SYSTEM] Your view of {opponent_player_tag}'s board:")
             send_board_to_player(current_player_id, target_board, show_hidden=False)  # Don't show hidden ships
 
-            # Let them know about the timeout
+            # Let them know aboutimeout
             send_msg_to_player(current_player_id, f"[SYSTEM] You have {INACTIVITY_TIMEOUT} seconds to make your move.")
 
             # Let the other player know they're waiting
@@ -443,14 +441,14 @@ def run_multiplayer_game(player1_data, player2_data, p1_input_queue, p2_input_qu
                 timeout_count[current_player_id] = 0
 
             except queue.Empty:
-                 # They took too long
+                 # took too long
                  print(f"[DEBUG] {current_player_tag} ({current_player_id}) timed out.")
                  timeout_count[current_player_id] += 1
 
                  timeout_msg = f"{current_player_tag} took too long (>{INACTIVITY_TIMEOUT}s). "
 
                  if timeout_count[current_player_id] >= MAX_TIMEOUTS:
-                     # Too many timeouts = forfeit
+                     # forfeit
                      forfeit_msg = f"[SYSTEM] {current_player_tag} forfeits after {MAX_TIMEOUTS} timeouts."
                      print(f"[GAME INFO] {forfeit_msg}")
 
@@ -489,14 +487,14 @@ def run_multiplayer_game(player1_data, player2_data, p1_input_queue, p2_input_qu
                     # Fire at that spot
                     result, sunk_ship = target_board.fire_at(row, col)
 
-                    # Update anyone watching
+                    # Update specatortrs
                     broadcast_board_func(player_boards[player1_data['id']], player_boards[player2_data['id']])
 
                     # Prepare messages
                     msg_for_active_player = f"You fired at {guess_input.upper()}: "
                     msg_for_opponent = f"{current_player_tag} fired at {guess_input.upper()}: "
 
-                    # Handle different shot results
+                    # Handle diff shot results
                     if result == 'hit':
                         if sunk_ship:
                             msg_for_active_player += f"[SYSTEM] HIT! You sank their {sunk_ship}!"
@@ -544,14 +542,14 @@ def run_multiplayer_game(player1_data, player2_data, p1_input_queue, p2_input_qu
                          # Next turn
                          turn_count += 1
 
-                except ValueError as e:  # Bad coordinate
+                except ValueError as e:  # Bad coord
                     print(f"[DEBUG] Bad coordinate: '{guess_input}' - {e}")
                     send_msg_to_player(current_player_id, f"[!] Invalid move '{guess_input}': {e}. Try again.")
-                    # Don't change turns, they get to try again
+                    # try again
                     continue
 
     except (PlayerDisconnectedException, Exception) as e:
-         # Handle any other errors
+         # Handle other errors
          print(f"[GAME INFO] Game interrupted: {type(e).__name__}: {e}")
          game_active = False
 
@@ -568,7 +566,7 @@ def run_multiplayer_game(player1_data, player2_data, p1_input_queue, p2_input_qu
             print(f"[DEBUG] Couldn't save final boards: {e}")
 
 
-# Single player test mode (unchanged)
+# Single player test mode
 def run_single_player_game_locally():
     board = Board(BOARD_SIZE)
 
