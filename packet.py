@@ -7,7 +7,7 @@ import zlib
 # game-specific fields
 # checksum
 
-#Recommended Packet Types
+# Packet Types
 #   Type Code	 Name	Purpose/When Used
 #1	USER_INPUT	        Player move, ship placement, or chat from client
 #2	SYSTEM_MESSAGE	    System messages from server (welcome, errors, etc)
@@ -15,7 +15,7 @@ import zlib
 #4	BOARD_UPDATE	    Board/grid updates (e.g., after a move)
 #5	GAME_STATE	        Game start, end, or status updates
 #6	ERROR	            Error or invalid packet notification
-#7	ACK	Acknowledgement (optional, for reliability)
+#7	ACK	Acknowledgement (if we get there)
 
 #"byte sum" or "additive checksum" instead of CRC32 from library
 
@@ -26,7 +26,7 @@ CHAT_MESSAGE    = 3  # Chat messages between players/spectators
 BOARD_UPDATE    = 4  # Board/grid updates (e.g., after a move)
 GAME_STATE      = 5  # Game start, end, or status updates
 ERROR           = 6  # Error or invalid packet notification
-ACK             = 7  # Acknowledgement (optional, for reliability)
+ACK             = 7  # Acknowledgement (if we get there)
 
 def pack_packet(seq_num, pktType, payload_bytes):
     payload_len = len(payload_bytes)
@@ -92,14 +92,14 @@ if __name__ == "__main__":
     seq2, pkt_type2, payload2 = unpack_packet(packet)
     print("Unpacked:", seq2, pkt_type2, payload2)
 
-    # Simulate a mismatched communication: wrong packet type expected
+    # simulate mismatched communication: wrong packet type expected
     expected_type = SYSTEM_MESSAGE
     if pkt_type2 == expected_type:
         print("Received expected SYSTEM_MESSAGE.")
     else:
         print(f"Packet type mismatch! Expected {expected_type}, got {pkt_type2}.")
 
-    # Simulate a corrupted packet (checksum mismatch)
+    # simulate  corruptd packet (checksum mismatch)
     corrupted_packet = bytearray(packet)
     corrupted_packet[10] ^= 0xFF  # Flip a byte in the payload
     try:
@@ -107,19 +107,19 @@ if __name__ == "__main__":
     except ValueError as e:
         print("Checksum error detected as expected:", e)
 
-    # Simulate sending 5 packets with incrementing seq_num numbers
+    # simulate send 5 packets with incrementing seq_num numbers
     packets = []
     for seq_num in range(1, 6):
         pkt = pack_packet(seq_num, USER_INPUT, f"Message {seq_num}".encode())
         packets.append(pkt)
 
-    # Simulate out-of-order delivery by shuffling the packets
+    # simulate out-of-order delivery via shuffling
     import random
     shuffled_packets = packets[:]
     random.shuffle(shuffled_packets)
-    print("Packet receive order (seq_num numbers):", [unpack_packet(thing)[0] for p in shuffled_packets])
+    print("Packet receive order (seq_num numbers):", [unpack_packet(i)[0] for i in shuffled_packets])
 
-    # Simulate receiver expecting packets in order
+    # simulate receiver expecting packets in order
     expected_seq = 1
     for thing in shuffled_packets:
         try:
