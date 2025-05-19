@@ -1,6 +1,9 @@
 # BEER: Battleships - Engage in Explosive Rivalry
 This project implements a networked, turn-based Battleship game named "BEER" as part of the CITS3002 Computer Networks course at the University of Western Australia. The project involves developing a multiplayer server and client(s) capable of handling players, managing game states, broadcasting results, and addressing network challenges.
 
+![image](https://github.com/user-attachments/assets/d1955370-efb4-4aeb-b85d-98b34dffd051)
+
+
 ## Project Overview
 The game follows the standard Battleship rules:
 
@@ -73,3 +76,5 @@ The implementation described by the files aims to fulfill requirements outlined 
 - T4.1 Custom Low-Level Protocol with Checksum: Implementation includes a custom packet format with a header (sequence number, packet type, payload length) and a byte sum checksum to detect corrupted packets.
 - T4.2 Instant Messaging (IM) Channel: A chat system is implemented allowing players and spectators to send messages using a /chat command, broadcasted to all participants.
 - T4.4 Denial of Service (DoS) Connection and Input-flooding Countermeasures: There are rate limits for inputs (2 messages/second) for clients and a maximum of 6 connections to the server, preventing spam that can consume excessive memory and CPU usage. More details are in the report.
+
+By David Poh and Colin Melville
