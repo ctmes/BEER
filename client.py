@@ -6,7 +6,7 @@ import signal
 import sys
 from packet import pack_packet, receive_packet, SYSTEM_MESSAGE, USER_INPUT
 
-# Should probably make these command line params someday
+# Should probably make these command line params
 SERVER_ADDR = '127.0.0.1'  # localhost for testing
 SERVER_PORT = 5001
 client_active = True  # Flag to control our loops
@@ -65,7 +65,7 @@ def msg_receiver(connection):
             print(f"\n[INFO] Connection error: {e}. Disconnecting.")
         client_active = False
     except Exception as e:
-        # something else broke
+        # some other errror
         if client_active:
             print(f"\n[INFO] Weird error in message thread: {e}")
         client_active = False
@@ -83,9 +83,9 @@ def main():
         # Connect to game server
         print(f"[INFO] Connecting to {SERVER_ADDR}:{SERVER_PORT}...")
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(10)  # don't hang forever
+        sock.settimeout(10)  # Don't hang forever
         sock.connect((SERVER_ADDR, SERVER_PORT))
-        sock.settimeout(None)  # back to normal mode
+        sock.settimeout(None)  # Back to normal mode
         print("[INFO] Connected!")
 
         # Login process
@@ -123,11 +123,11 @@ def main():
                 print("\n[INFO] Interrupted! Type '/quit' to exit properly or press Ctrl+C again to force quit.")
                 continue
 
-            # Check if we should still be running
+            # Check if we should still be runnig
             if not client_active:
                 break
 
-            # Send message to server
+            # Send messege to server
             try:
                 # always use seq 2 for now
                 pkt = pack_packet(2, USER_INPUT, text.encode())

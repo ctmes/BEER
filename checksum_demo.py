@@ -10,7 +10,7 @@ def inject_random_byte_error(packet_bytes, num_errors=1):
     """ Randomly injects some errors (random bit flips) into the packet except checksum.
     If there are too few bytes, it just returns the packet unaltered.
     """
-    if len(packet_bytes) < 6: # check valid packet
+    if len(packet_bytes) < 6: # check valid apacket
         return packet_bytes
 
     injectable_area = packet_bytes[:-1]
@@ -18,7 +18,7 @@ def inject_random_byte_error(packet_bytes, num_errors=1):
 
     # Inject errors
     for _ in range(num_errors):
-        if not injectable_area:  # just in case...
+        if not injectable_area:  # just in case
             break
         error_index = random.randrange(len(injectable_area))
 
@@ -97,5 +97,5 @@ def run_simulation(num_packets, error_probability_byte):
 
 
 if __name__ == "__main__":
-    # 10,000 packets and a 1% chance of error
+    # 10,000 packets and 1% chance of error
     run_simulation(num_packets=10000, error_probability_byte=0.01)

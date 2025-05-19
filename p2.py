@@ -34,7 +34,7 @@ def main():
             if not server_line:
                 break
             print(f"[SERVER] {server_line.strip()}")
-            # just checking for prompts here - kinda lazy tbh
+            # lazy prompt checkign
             if "[SYSTEM] Enter start coordinate" in server_line or "[SYSTEM] Enter orientation" in server_line:
                 # Send the corresponding input
                 out = inputsToSend[ix]

@@ -12,7 +12,7 @@ import random
 import threading
 import socket  # need this for error types
 import time    # for timeouts
-import queue   # thread communication
+import queue
 
 
 # globals
@@ -46,10 +46,9 @@ class Board:
 
     def __init__(self, size=BOARD_SIZE):
         self.size = size
-        # hidden grid has the ships, display is what opponent sees
         self.hidden_grid = [['.' for _ in range(size)] for _ in range(size)]
         self.display_grid = [['.' for _ in range(size)] for _ in range(size)]
-        self.placed_ships = []  # will contain ship info
+        self.placed_ships = []
 
     def place_ships_randomly(self, ships=SHIPS):
         for ship_name, ship_size in ships:
@@ -58,7 +57,7 @@ class Board:
             while not placed and tries < 100:
                 tries += 1
                 horizontal = random.randint(0, 1) == 0  # true=horizontal, false=vertical
-                orientation = 0 if horizontal else 1  # code uses 0/1 internally
+                orientation = 0 if horizontal else 1
 
                 row = random.randint(0, self.size - 1)
                 col = random.randint(0, self.size - 1)
@@ -112,7 +111,7 @@ class Board:
                 if self.hidden_grid[row][col + c_offset] != '.':
                     return False
         else:  # Vertical
-            if row + ship_size > self.size:  # ship would go off the bottom
+            if row + ship_size > self.size:  # ship wouldg o off the bottom
                 return False
             if col < 0 or col >= self.size:  # column out of bounds
                 return False
@@ -156,7 +155,7 @@ class Board:
         return ('error', "Unknown cell state")
 
     def _mark_hit_and_check_sunk(self, row, col):
-        # Mark a hit on a ship and check if it sank
+        # Mark a hit on a ship and check if sank or not
         for ship in self.placed_ships:
             if (row, col) in ship['positions']:
                 ship['positions'].remove((row, col))
@@ -383,7 +382,7 @@ def run_multiplayer_game(player1_data, player2_data, p1_input_queue, p2_input_qu
              status = placement_status.get(p_id)
 
              if isinstance(status, Exception):
-                 # Something went wrong during placement
+                 # Something went wrong during pkacemnet
                  print(f"[INFO] Placement failed for {p_id}: {type(status).__name__}")
 
                  # Let the other player know what happened
@@ -477,11 +476,11 @@ def run_multiplayer_game(player1_data, player2_data, p1_input_queue, p2_input_qu
                  turn_count += 1
                  continue
 
-            # Process their move (if we got one)
+            # Process their move if we have one
             if guess_input is not None:
                 print(f"[DEBUG] Processing move: '{guess_input}'")
                 try:
-                    # Convert coordinate string to board position
+                    # Convert coordinate string to board positiong
                     row, col = parse_coordinate(guess_input)
 
                     # Fire at that spot
@@ -494,7 +493,7 @@ def run_multiplayer_game(player1_data, player2_data, p1_input_queue, p2_input_qu
                     msg_for_active_player = f"You fired at {guess_input.upper()}: "
                     msg_for_opponent = f"{current_player_tag} fired at {guess_input.upper()}: "
 
-                    # Handle diff shot results
+                    # Handel diff shot results
                     if result == 'hit':
                         if sunk_ship:
                             msg_for_active_player += f"[SYSTEM] HIT! You sank their {sunk_ship}!"
