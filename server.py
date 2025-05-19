@@ -6,7 +6,7 @@ import time
 import gc
 import queue
 from battleship import Board, parse_coordinate, SHIPS, BOARD_SIZE, run_multiplayer_game, PlayerDisconnectedException, PlayerTimeoutException
-from packet import pack_packet, receive_packet, SYSTEM_MESSAGE, USER_INPUT
+from packet import pack_packet, SYSTEM_MESSAGE, receive_packet, USER_INPUT
 
 HOST = '127.0.0.1'
 PORT = 5001
@@ -47,23 +47,23 @@ INPUT_RATE_DELAY = 1.0 / INPUT_RATE_LIMIT_PER_SECOND
 print(f"[DEBUG] SERVER.PY: <module>: Initializing server with HOST: {HOST}, PORT: {PORT}")
 
 
-def send_message_to_client(client_id, message):
+def send_message_to_client(client_id, message, pkt_type=SYSTEM_MESSAGE):
     """Safely sends a message to a client."""
     # print(f"[DEBUG] SERVER.PY: send_message_to_client: Attempting to send message to {client_id}: {message[:50]}...") # Log message attempt
     with lock:
         client_data = clients.get(client_id)
-        if client_data and client_data.get("w") and not client_data["w"].closed:
-            try:
-                client_data["w"].write(message + '\n')
-                client_data["w"].flush()
-                # print(f"[DEBUG] SERVER.PY: send_message_to_client: Successfully sent message to {client_id}")
-            except (socket.error, BrokenPipeError, ConnectionResetError) as e:
-                print(f"[INFO] Client {client_id} disconnected during send: {e}")
-                # Connection lost, handle removal
-                remove_client(client_id)
-            except Exception as e:
-                 print(f"[ERROR] SERVER.PY: send_message_to_client: Unexpected error sending to {client_id}: {e}")
-                 remove_client(client_id)
+        conn = client_data.get("socket") if client_data else None
+    if conn:
+        try:
+            packet = pack_packet(0, pkt_type, message.encode())
+            conn.sendall(packet)
+        except (socket.error, BrokenPipeError, ConnectionResetError) as e:
+            print(f"[INFO] Client {client_id} disconnected during send: {e}")
+            # Connection lost, handle removal
+            remove_client(client_id)
+        except Exception as e:
+             print(f"[ERROR] SERVER.PY: send_message_to_client: Unexpected error sending to {client_id}: {e}")
+             remove_client(client_id)
         # else:
             # print(f"[DEBUG] SERVER.PY: send_message_to_client: Attempted to send to non-existent or closed client {client_id}")
 
@@ -79,25 +79,31 @@ def broadcast_to_all(message, sender_id=None):
         if client_id != sender_id:
             send_message_to_client(client_id, message)
 
-def get_client_username(rfile, wfile, addr):
-    """Prompt the client for a username and return it. Returns None if not received."""
+def get_client_username(conn, addr):
+    """Prompt the client for a username using the packet protocol. Returns None if not received."""
     try:
-        # Send prompt to client
-        try:
-            wfile.write("Enter your username: \n")
-            wfile.flush()
-        except Exception:
-            pass  # If we can't prompt, just read
+        # Send prompt as a SYSTEM_MESSAGE packet
+        prompt_packet = pack_packet(0, SYSTEM_MESSAGE, b"Enter your username:")
+        conn.sendall(prompt_packet)
 
-        username = rfile.readline()
-        if username:
-            username = username.strip()
+        # Receive the response packet
+        result = receive_packet(conn)
+        if result is None:
+            print(f"[ERROR] SERVER.PY: get_client_username: No valid packet received from {addr}. Closing connection.")
+            return None
+
+        seq, pkt_type, payload = result
+        if pkt_type != USER_INPUT:
+            print(f"[ERROR] SERVER.PY: get_client_username: Expected USER_INPUT, got {pkt_type} from {addr}")
+            return None
+
+        username = payload.decode().strip()
         if not username:
-            print(f"[ERROR] SERVER.PY: get_client_username: No username received from {addr}. Closing connection.")
+            print(f"[ERROR] SERVER.PY: get_client_username: No username received or username empty from {addr}.")
             return None
         return username
     except Exception as e:
-        print(f"[ERROR] SERVER.PY: get_client_username: Failed to read username from {addr}: {e}")
+        print(f"[ERROR] SERVER.PY: get_client_username: Failed during packet-based username exchange: {e}")
         return None
     
 def broadcast_game_board_state(player1_board, player2_board):
@@ -231,26 +237,25 @@ def handle_command(client_id, command):
 def handle_client_input(client_id):
     """Thread function to continuously read input from a client."""
     print(f"[DEBUG] SERVER.PY: handle_client_input: handle_client_input thread started for {client_id}")
-    rfile = None
 
-    with lock: # Acquire lock initially to get rfile
+    with lock:
         client_data = clients.get(client_id)
-        if client_data:
-            rfile = client_data["r"]
-        else:
+        conn = client_data["socket"] if client_data else None
+        if not conn:
             print(f"[ERROR] SERVER.PY: handle_client_input started for unknown client_id {client_id}")
-            return # Exit thread if client data not found
+            return
 
     try:
         while True:
-            line = rfile.readline()
-            if not line:
-                print(f"[INFO] Client {client_id} disconnected (readline returned empty).")
-                break # Exit loop on disconnection
+            result = receive_packet(conn)
+            if not result:
+                print(f"[INFO] Client {client_id} disconnected (no packet received).")
+                break
 
-            line = line.strip()
+            seq, pkt_type, payload = result
+            line = payload.decode().strip()
             if not line:
-                continue # Ignore empty lines
+                continue
 
             print(f"[DEBUG] SERVER.PY: handle_client_input: Received from {client_id}: '{line}'")
 
@@ -258,42 +263,30 @@ def handle_client_input(client_id):
             current_time = time.time()
             with lock:
                 client_data = clients.get(client_id)
-                if client_data: # Ensure client data still exists
+                if client_data:
                     time_since_last_input = current_time - client_data['last_input_time']
                     if time_since_last_input < INPUT_RATE_DELAY:
                         send_message_to_client(client_id, "[SYSTEM] Input rate limit exceeded. Slow down.")
-                        continue # Ignore this input and wait for the next one
-                    client_data['last_input_time'] = current_time # Update last input time
+                        continue
+                    client_data['last_input_time'] = current_time
 
-                # Get current role, game state, and queue under the lock after rate limit check
                 current_role = client_data.get("role") if client_data else None
                 player_input_queue = client_data.get("input_queue") if client_data else None
-                current_game_in_progress = game_in_progress # Get the global game state
-
+                current_game_in_progress = game_in_progress
 
             if line.startswith('/'):
-                # It's a command
                 handle_command(client_id, line)
             else:
-                # It's not a command. Could be a game move or chat.
-                # Use the state retrieved under the lock
-                # Ensure client_data still exists and role is player and game is active
                 if current_role == "player" and current_game_in_progress and player_input_queue:
-                    # If it's a player in an active game AND they have an input queue,
-                    # put the input into their queue for the game logic to process.
                     try:
                         print(f"[DEBUG:handle_client_input] Putting input '{line}' into {client_id}'s queue (Role: {current_role}, Game: {current_game_in_progress}).")
                         player_input_queue.put_nowait(line)
                     except queue.Full:
-                         send_message_to_client(client_id, "[SYSTEM] Input queue is full. Please wait a moment.")
+                        send_message_to_client(client_id, "[SYSTEM] Input queue is full. Please wait a moment.")
                     except Exception as e:
-                         print(f"[ERROR:handle_client_input] Error putting input into {client_id}'s queue: {e}")
-                         send_message_to_client(client_id, "[SYSTEM] An error occurred processing your input.")
-
+                        print(f"[ERROR:handle_client_input] Error putting input into {client_id}'s queue: {e}")
+                        send_message_to_client(client_id, "[SYSTEM] An error occurred processing your input.")
                 else:
-                    # If it's a spectator, or a player not in a game, or a player in game
-                    # but without an input queue (shouldn't happen), or input wasn't for game... treat as chat.
-                    # Use the current role retrieved under the lock for chat message formatting
                     sender_info = f"{current_role.capitalize()} {client_id}" if current_role else client_id
                     chat_message = f"[CHAT] {sender_info}: {line}"
                     broadcast_to_all(chat_message, sender_id=client_id)
@@ -413,7 +406,14 @@ def recycle_players_to_spectators(game_player_ids):
             client_data = clients.get(player_id)
             if client_data and client_data.get("role") == "player":
                 # Check if client is still connected before trying to recycle
-                if client_data.get("w") and not client_data["w"].closed:
+                if client_data:
+                    # Close the socket outside the lock if it exists
+                    sock = client_data.get("socket")
+                    if sock:
+                        try:
+                            sock.close()
+                        except:
+                            pass
                     try:
                         send_message_to_client(player_id, "[SYSTEM] Game has ended. You are being returned to the spectator queue.")
                         client_data["role"] = "spectator" # Change role
@@ -450,7 +450,7 @@ def promote_spectators_to_players():
     with lock:
         # Combine and filter for clients that are still connected
         combined_queue = players_waiting + spectators_waiting
-        eligible_clients_ids = [cid for cid in combined_queue if cid in clients and clients[cid].get("w") and not clients[cid]["w"].closed] # Check if connection is active
+        eligible_clients_ids = [cid for cid in combined_queue if cid in clients and clients[cid].get("socket")] # Check if connection is active
 
         print(f"[DEBUG] SERVER.PY: promote_spectators_to_players: Eligible clients in queue: {eligible_clients_ids}")
 
@@ -569,17 +569,13 @@ def check_start_game():
 
             # Initialize active_games for reconnection and per-player state
             active_games[player1_data['id']] = {
-                "board": None,  # Will be set by run_multiplayer_game
-                "rfile": player1_data["r"],
-                "wfile": player1_data["w"],
+                "board": None,
                 "disconnected": False,
                 "reconnect_deadline": None,
                 "opponent": player2_data['id'],
             }
             active_games[player2_data['id']] = {
-                "board": None,  # Will be set by run_multiplayer_game
-                "rfile": player2_data["r"],
-                "wfile": player2_data["w"],
+                "board": None,
                 "disconnected": False,
                 "reconnect_deadline": None,
                 "opponent": player1_data['id'],
@@ -715,16 +711,14 @@ def mark_player_disconnected(client_id, active_games):
                 print(f"[INFO] Countdown stopped: {client_id} has reconnected.")
                 return
             try:
-                player_data["w"].write(f"Reconnect within {remaining} seconds or you will forfeit!\n")
-                player_data["w"].flush()
+                send_message_to_client(client_id, f"[SYSTEM] Reconnect within {remaining} seconds or you will forfeit!")
             except Exception as e:
-                print(f"[DEBUG] Countdown write failed for {client_id}: {e}")  # <-- Add this line
+                print(f"[DEBUG] Countdown send_message_to_client failed for {client_id}: {e}")
             try:
                 if opponent_data:
-                    opponent_data["w"].write(f"Opponent has {remaining} seconds to reconnect or you will win by forfeit.\n")
-                    opponent_data["w"].flush()
+                    send_message_to_client(opponent_id, f"[SYSTEM] Opponent has {remaining} seconds to reconnect or you will win by forfeit.")
             except Exception as e:
-                print(f"[DEBUG] Countdown write failed for opponent {opponent_id}: {e}")  # <-- Add this line
+                print(f"[DEBUG] Countdown send_message_to_client failed for opponent {opponent_id}: {e}")
             time.sleep(1)
             remaining -= 1
         print(f"[INFO] Player {client_id} did not reconnect in time. Removing from game.")
@@ -772,10 +766,7 @@ def main():
             try:
                 conn, addr = server_socket.accept()
 
-                # --- Create file objects before reading username ---
-                rfile = conn.makefile('r')
-                wfile = conn.makefile('w')
-                username = get_client_username(rfile, wfile, addr)
+                username = get_client_username(conn, addr)
                 if not username:
                     conn.close()
                     continue  # Skip to next accept loop iteration
@@ -793,41 +784,31 @@ def main():
                                 old_client_data = clients.get(client_id)
                                 if old_client_data:
                                     try:
-                                        print(f"[DEBUG] SERVER.PY: main: Cleaning up old handles for {client_id}.")
-                                        if old_client_data.get("r") and not old_client_data["r"].closed:
-                                            old_client_data["r"].close()
-                                        if old_client_data.get("w") and not old_client_data["w"].closed:
-                                            old_client_data["w"].close()
+                                        print(f"[DEBUG] SERVER.PY: main: Cleaning up old socket for {client_id}.")
                                         if old_client_data.get("socket"):
                                             old_client_data["socket"].close()
                                     except Exception:
                                         pass
 
-                                # Update file handles
-                                game_state["rfile"] = rfile
-                                game_state["wfile"] = wfile
+                                # Update reconnection state
                                 game_state["disconnected"] = False
                                 disconnected_players.pop(client_id, None)
 
-                                # Update client data with new handles
-                                clients[client_id]["r"] = rfile
-                                clients[client_id]["w"] = wfile
+                                # Update client data with new socket
                                 clients[client_id]["socket"] = conn
 
                                 # Optionally notify opponent
                                 opponent_id = game_state.get("opponent")
                                 if opponent_id and opponent_id in active_games:
                                     try:
-                                        active_games[opponent_id]["wfile"].write(f"[INFO] Player '{client_id}' has reconnected!\n")
-                                        active_games[opponent_id]["wfile"].flush()
+                                        send_message_to_client(opponent_id, f"[INFO] Player '{client_id}' has reconnected!")
                                         print(f"[DEBUG] SERVER.PY: main: Notifying opponent {opponent_id} of {client_id} reconnection.")
                                     except Exception:
                                         pass
 
                                 # Notify the reconnected player
                                 try:
-                                    wfile.write("You have reconnected to your game!\n")
-                                    wfile.flush()
+                                    send_message_to_client(client_id, "[SYSTEM] You have reconnected to your game!")
                                     print(f"[DEBUG] SERVER.PY: main: Notifying {client_id} of successful reconnection.")
                                 except Exception:
                                     pass
@@ -835,34 +816,31 @@ def main():
                                 # Send the board state
                                 board = game_state.get("board")
                                 if board:
-                                    wfile.write("Here is your current board state:\n")
-                                    wfile.write(format_board_for_display(board) + "\n")
-                                    wfile.flush()
+                                    send_message_to_client(client_id, "Here is your current board state:")
+                                    send_message_to_client(client_id, format_board_for_display(board))
                                 # --- ONLY SEND THE APPROPRIATE MESSAGE BASED ON TURN ---
                                 if game_state.get("is_current_turn"):
                                     try:
                                         board = game_state.get("board")
                                         if board:
-                                            wfile.write("Here is your current board state:\n")
-                                            wfile.write(format_board_for_display(board) + "\n")
-                                        wfile.write("\n--- It's your turn! ---\n")
-                                        wfile.write("[SYSTEM] Your view of the opponent's board:\n")
+                                            send_message_to_client(client_id, "Here is your current board state:")
+                                            send_message_to_client(client_id, format_board_for_display(board))
+                                        send_message_to_client(client_id, "\n--- It's your turn! ---")
+                                        send_message_to_client(client_id, "[SYSTEM] Your view of the opponent's board:")
                                         opponent_id = game_state.get("opponent")
                                         if opponent_id and opponent_id in active_games:
                                             opponent_board = active_games[opponent_id]["board"]
-                                            wfile.write(format_board_for_display(opponent_board) + "\n")
-                                        wfile.write("[SYSTEM] Please enter your move (e.g., A1):\n")
-                                        wfile.flush()
+                                            send_message_to_client(client_id, format_board_for_display(opponent_board))
+                                        send_message_to_client(client_id, "[SYSTEM] Please enter your move (e.g., A1):")
                                         print(f"[DEBUG] SERVER.PY: main: Re-sent turn prompt to {client_id} after reconnection.")
                                     except Exception as e:
                                         print(f"[ERROR] SERVER.PY: main: Failed to re-send turn prompt to {client_id}: {e}")
                                 else:
                                     board = game_state.get("board")
                                     if board:
-                                        wfile.write("Here is your current board state:\n")
-                                        wfile.write(format_board_for_display(board) + "\n")
-                                    wfile.write("[SYSTEM] Please wait for your turn or continue playing.\n")
-                                    wfile.flush()
+                                        send_message_to_client(client_id, "Here is your current board state:")
+                                        send_message_to_client(client_id, format_board_for_display(board))
+                                    send_message_to_client(client_id, "[SYSTEM] Please wait for your turn or continue playing.")
 
                                 # --- THIS IS CRUCIAL: restart input handler thread ---
                                 threading.Thread(target=handle_client_input, args=(client_id,), daemon=True).start()
@@ -877,8 +855,7 @@ def main():
                             else:
                                 print(f"[INFO] {client_id} tried to reconnect but missed the deadline.")
                                 try:
-                                    wfile.write("Reconnect window expired. You have forfeited your game.\n")
-                                    wfile.flush()
+                                    send_message_to_client(client_id, "Reconnect window expired. You have forfeited your game.")
                                 except Exception:
                                     pass
                                 conn.close()
@@ -904,15 +881,15 @@ def main():
                     if username in clients:
                         print(f"[INFO] SERVER.PY: main: Username '{username}' already in use. Refusing connection from {addr}.")
                         try:
-                            wfile.write("[SYSTEM] Username already in use. Please reconnect with a different name.\n")
-                            wfile.flush()
+                            # Use packet-based message instead of wfile
+                            packet = pack_packet(0, SYSTEM_MESSAGE, b"Username already in use. Please reconnect with a different name.")
+                            conn.sendall(packet)
                         except Exception:
                             pass
                         conn.close()
                         continue
 
-                client_id = username  # Use username as client_id
-
+                    client_id = username  # Use username as client_id
                 with lock:
                     # --- Connection Limit Check ---
                     if len(clients) >= MAX_CONNECTIONS:
@@ -946,15 +923,13 @@ def main():
                         print(f"[DEBUG] SERVER.PY: main: {client_id} added to spectators_waiting.")
 
                     clients[client_id] = {
-                        "r": rfile,
-                        "w": wfile,
-                        "socket": conn, # Store socket for potential direct closing on removal
+                        "socket": conn,
                         "addr": addr,
                         "id": client_id,
                         "role": role,
-                        "input_queue": None, # Input queue is created only when promoted to an active player in a game
-                        "last_input_time": time.time() # Initialize last input time
-                    }
+                        "input_queue": None,
+                        "last_input_time": time.time()
+                    }   
                     print(f"[DEBUG] SERVER.PY: main: Client data stored for {client_id} with role {role}. Total clients: {len(clients)}")
 
 
