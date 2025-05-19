@@ -60,7 +60,7 @@ def msg_receiver(connection):
             if text:
                 print(pretty_print(text))
     except (socket.error, BrokenPipeError, ConnectionResetError) as e:
-        # network went boom
+        # network broke
         if client_active:
             print(f"\n[INFO] Connection error: {e}. Disconnecting.")
         client_active = False
@@ -170,7 +170,7 @@ def main():
             try:
                 sock.close()
             except:
-                pass  # meh, we're quitting anyway
+                pass  # we're quitting anyway
         print("[INFO] Goodbye!")
 
 
