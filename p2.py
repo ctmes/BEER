@@ -6,7 +6,7 @@ PORT = 5001
 
 # Pretend inputs (should validate this later maybe)
 inputsToSend = [
-    "a",    # 1st ship coordinate (will likely be invalid, but as requested)
+    "a1",    # 1st ship coordinate
     "h",    # 1st ship orientation
     "b1",   # 2nd ship coordinate
     "h",    # 2nd ship orientation
