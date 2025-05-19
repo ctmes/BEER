@@ -4,6 +4,8 @@ import re
 import os
 import signal
 import sys # Import sys for stdin/stdout check
+from packet import pack_packet, receive_packet, SYSTEM_MESSAGE, USER_INPUT
+
 
 HOST = '127.0.0.1'
 PORT = 5001

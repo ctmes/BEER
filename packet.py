@@ -1,6 +1,24 @@
 import struct
 import zlib
 
+# Packet Structure:
+# sequence number
+# packet type 
+# game-specific fields
+# checksum
+
+#Recommended Packet Types
+#   Type Code	 Name	Purpose/When Used                                     
+#1	USER_INPUT	        Player move, ship placement, or chat from client    
+#2	SYSTEM_MESSAGE	    System messages from server (welcome, errors, etc)
+#3	CHAT_MESSAGE	    Chat messages between players/spectators
+#4	BOARD_UPDATE	    Board/grid updates (e.g., after a move)
+#5	GAME_STATE	        Game start, end, or status updates
+#6	ERROR	            Error or invalid packet notification
+#7	ACK	Acknowledgement (optional, for reliability)
+
+#"byte sum" or "additive checksum" instead of CRC32 from library
+
 # Packet Type Constants
 USER_INPUT      = 1  # Player move, ship placement, or chat from client
 SYSTEM_MESSAGE  = 2  # System messages from server (welcome, errors, etc)
@@ -12,25 +30,56 @@ ACK             = 7  # Acknowledgement (optional, for reliability)
 
 def pack_packet(sequence, packet_type, payload_bytes):
     payload_len = len(payload_bytes)
-    header = struct.pack('!HBH', sequence, packet_type, payload_len)
-    body = header + payload_bytes
-    checksum = sum(body) % 256
-    packet = body + struct.pack('!B', checksum)
+    header      = struct.pack('!HBH', sequence, packet_type, payload_len)
+    body        = header + payload_bytes
+    checksum    = sum(body) % 256
+    packet      = body + struct.pack('!B', checksum)
     return packet
 
 def unpack_packet(packet_bytes):
     if len(packet_bytes) < 6:
         raise ValueError("Packet too short")
-    header = packet_bytes[:5]
+    header                     = packet_bytes[:5]
     seq, pkt_type, payload_len = struct.unpack('!HBH', header)
-    payload = packet_bytes[5:-1]
-    checksum_recv = packet_bytes[-1]
-    body = packet_bytes[:-1]
-    checksum_calc = sum(body) % 256
-    if checksum_recv != checksum_calc:
+    payload                    = packet_bytes[5:-1]
+    checksum_recv              = packet_bytes[-1]
+    body                       = packet_bytes[:-1]
+    checksum_calc              = sum(body) % 256
+    if checksum_recv          != checksum_calc:
         raise ValueError("Checksum mismatch")
     return seq, pkt_type, payload
 
+
+def recv_full(conn, n):
+    """Helper to receive exactly n bytes from the socket."""
+    data = b''
+    while len(data) < n:
+        chunk = conn.recv(n - len(data))
+        if not chunk:
+            raise ConnectionError("Connection closed")
+        data += chunk
+    return data
+
+def receive_packet(conn):
+    # 1. Read header (5 bytes)
+    header = recv_full(conn, 5)
+    seq, pkt_type, payload_len = struct.unpack('!HBH', header)
+    # 2. Read payload
+    payload = recv_full(conn, payload_len)
+    # 3. Read checksum (1 byte)
+    checksum = recv_full(conn, 1)
+    # 4. Combine and unpack
+    packet_bytes = header + payload + checksum
+    try:
+        seq, pkt_type, payload = unpack_packet(packet_bytes)
+        return seq, pkt_type, payload
+    except ValueError as e:
+        print("Corrupted packet received:", e)
+        # Optionally: send ERROR packet or request retransmission
+        return None
+
+
+#----------------------------TESTS----------------------------
 if __name__ == "__main__":
     #matching type 
     seq = 1
@@ -82,20 +131,3 @@ if __name__ == "__main__":
             print("Corrupted packet detected:", e)
 
 
-# Packet Structure:
-# sequence number
-# packet type 
-# game-specific fields
-# checksum
-
-#Recommended Packet Types
-#   Type Code	 Name	Purpose/When Used                                     
-#1	USER_INPUT	        Player move, ship placement, or chat from client    
-#2	SYSTEM_MESSAGE	    System messages from server (welcome, errors, etc)
-#3	CHAT_MESSAGE	    Chat messages between players/spectators
-#4	BOARD_UPDATE	    Board/grid updates (e.g., after a move)
-#5	GAME_STATE	        Game start, end, or status updates
-#6	ERROR	            Error or invalid packet notification
-#7	ACK	Acknowledgement (optional, for reliability)
-
-#"byte sum" or "additive checksum" instead of CRC32 from library

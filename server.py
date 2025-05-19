@@ -6,6 +6,7 @@ import time
 import gc
 import queue
 from battleship import Board, parse_coordinate, SHIPS, BOARD_SIZE, run_multiplayer_game, PlayerDisconnectedException, PlayerTimeoutException
+from packet import pack_packet, receive_packet, SYSTEM_MESSAGE, USER_INPUT
 
 HOST = '127.0.0.1'
 PORT = 5001
