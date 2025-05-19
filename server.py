@@ -13,23 +13,23 @@ PORT = 5001
 
 # Global server state
 # Added 'last_input_time' to client data for input rate limiting
-clients = {} # {client_id: 
-                #{"r": rfile, "w": wfile, 
-                # "addr": addr, 
-                # "id": client_id, 
-                # "role": "player" or "spectator", 
-                # "input_queue": queue.Queue() if player, 
-                # "last_input_time": float, 
+clients = {} # {client_id:
+                #{"r": rfile, "w": wfile,
+                # "addr": addr,
+                # "id": client_id,
+                # "role": "player" or "spectator",
+                # "input_queue": queue.Queue() if player,
+                # "last_input_time": float,
                 # "socket": socket_obj}}
 
 disconnected_players = {}
 active_games = {}  # {username:
-                #        {"board": ..., 
-                #         "rfile": ..., 
-                #         "wfile": ..., 
-                #         "disconnected": False, 
+                #        {"board": ...,
+                #         "rfile": ...,
+                #         "wfile": ...,
+                #         "disconnected": False,
                 #         "reconnect_deadline": None, ...}}
-                
+
 players_waiting = [] # List of client_ids waiting for a game
 spectators_waiting = [] # List of client_ids waiting for a game or spectating
 game_in_progress = False
@@ -40,8 +40,8 @@ GAME_START_COUNTDOWN = 5  # seconds
 RECONNECT_TIMEOUT = 30
 
 # --- Rate Limiting and Connection Limits ---
-MAX_CONNECTIONS = 6
-INPUT_RATE_LIMIT_PER_SECOND = 10
+MAX_CONNECTIONS = 6 # Changed to 6
+INPUT_RATE_LIMIT_PER_SECOND = 2 # Changed to 2
 INPUT_RATE_DELAY = 1.0 / INPUT_RATE_LIMIT_PER_SECOND
 
 print(f"[DEBUG] SERVER.PY: <module>: Initializing server with HOST: {HOST}, PORT: {PORT}")
@@ -105,7 +105,7 @@ def get_client_username(conn, addr):
     except Exception as e:
         print(f"[ERROR] SERVER.PY: get_client_username: Failed during packet-based username exchange: {e}")
         return None
-    
+
 def broadcast_game_board_state(player1_board, player2_board):
     """Sends the current public board state to all spectators."""
     # Format the boards side-by-side
@@ -705,8 +705,8 @@ def mark_player_disconnected(client_id, active_games):
     def countdown_and_remove():
         remaining = RECONNECT_TIMEOUT
         while remaining > 0:
-            print(f"\n[DEBUG] SERVER.PY: ----------countdown_and_remove called--------------------") 
-            print(f"[DEBUG] SERVER.PY Countdown running for {client_id}: {remaining} seconds left") 
+            print(f"\n[DEBUG] SERVER.PY: ----------countdown_and_remove called--------------------")
+            print(f"[DEBUG] SERVER.PY Countdown running for {client_id}: {remaining} seconds left")
             if client_id not in disconnected_players or not active_games[client_id].get("disconnected", True):
                 print(f"[INFO] Countdown stopped: {client_id} has reconnected.")
                 return
@@ -929,7 +929,7 @@ def main():
                         "role": role,
                         "input_queue": None,
                         "last_input_time": time.time()
-                    }   
+                    }
                     print(f"[DEBUG] SERVER.PY: main: Client data stored for {client_id} with role {role}. Total clients: {len(clients)}")
 
 
