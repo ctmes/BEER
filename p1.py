@@ -4,8 +4,8 @@ import time
 HOST = '127.0.0.1'
 PORT = 5001
 
-# The sequence of ship placement inputs to send after each prompt
-placement_inputs = [
+# Pretend inputs (should validate this later maybe)
+inputsToSend = [
     "a",    # 1st ship coordinate (will likely be invalid, but as requested)
     "h",    # 1st ship orientation
     "b1",   # 2nd ship coordinate
@@ -23,28 +23,29 @@ def main():
         rfile = sock.makefile('r')
         wfile = sock.makefile('w')
 
-        # Send username first
+        # This should probably be read from user input but hardcoding for now
         wfile.write("P1\n")
         wfile.flush()
         print("[CLIENT] Sent username: P1")
 
-        input_idx = 0
-        while input_idx < len(placement_inputs):
+        ix = 0
+        while ix < len(inputsToSend):
             server_line = rfile.readline()
             if not server_line:
                 break
             print(f"[SERVER] {server_line.strip()}")
-            # Wait for the prompt for coordinate or orientation
+            # just checking for prompts here - kinda lazy tbh
             if "[SYSTEM] Enter start coordinate" in server_line or "[SYSTEM] Enter orientation" in server_line:
                 # Send the corresponding input
-                to_send = placement_inputs[input_idx]
-                print(f"[CLIENT] Sending: {to_send}")
-                wfile.write(to_send + "\n")
+                out = inputsToSend[ix]
+                print(f"[CLIENT] Sending: {out}")
+                # DEBUG: sent input"
+                wfile.write(out + "\n")
                 wfile.flush()
-                input_idx += 1
+                ix += 1
                 time.sleep(0.2)  # Small delay to avoid flooding
 
-        # Optionally, print further server output
+        # print anything else server says (should limit this?)
         for _ in range(10):
             server_line = rfile.readline()
             if not server_line:

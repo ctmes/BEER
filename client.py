@@ -6,155 +6,175 @@ import signal
 import sys
 from packet import pack_packet, receive_packet, SYSTEM_MESSAGE, USER_INPUT
 
+# Should probably make these command line params someday
+SERVER_ADDR = '127.0.0.1'  # localhost for testing
+SERVER_PORT = 5001
+client_active = True  # Flag to control our loops
 
-HOST = '127.0.0.1'
-PORT = 5001
-running = True  # Global flag to control client loops
-
-# Colors for different message types (ANSI escape codes)
-COLORS = {
+# Terminal colors - makes output prettier
+# copied from my other project, might need fixing for Windows
+MSG_COLORS = {
     'RESET': '\033[0m',
     'SYSTEM': '\033[1;33m',  # Yellow bold
-    'CHAT': '\033[1;36m',    # Cyan bold
-    'ERROR': '\033[1;31m',   # Red bold
-    'GAME': '\033[1;32m',    # Green bold
+    'CHAT': '\033[1;36m',  # Cyan bold
+    'ERROR': '\033[1;31m',  # Red bold
+    'GAME': '\033[1;32m',  # Green bold
 }
 
 
-def colorize_message(message):
-    """Add color to different message types."""
+def pretty_print(msg):
+    """Make messages look nicer with colors based on type"""
+    # skip colors if not in a proper terminal
     if not sys.stdout.isatty():
-        return message
-    if message.startswith("[SYSTEM]"):
-        return f"{COLORS['SYSTEM']}{message}{COLORS['RESET']}"
-    elif message.startswith("[CHAT]"):
-        return f"{COLORS['CHAT']}{message}{COLORS['RESET']}"
-    elif message.startswith("[ERROR]"):
-        return f"{COLORS['ERROR']}{message}{COLORS['RESET']}"
-    elif message.startswith("[GAME]"):
-        return f"{COLORS['GAME']}{message}{COLORS['RESET']}"
-    return message
+        return msg
+
+    # lazy way to handle different message types
+    if "[SYSTEM]" in msg:
+        return f"{MSG_COLORS['SYSTEM']}{msg}{MSG_COLORS['RESET']}"
+    elif "[CHAT]" in msg:
+        return f"{MSG_COLORS['CHAT']}{msg}{MSG_COLORS['RESET']}"
+    elif "[ERROR]" in msg:
+        return f"{MSG_COLORS['ERROR']}{msg}{MSG_COLORS['RESET']}"
+    elif "[GAME]" in msg:
+        return f"{MSG_COLORS['GAME']}{msg}{MSG_COLORS['RESET']}"
+    return msg
 
 
-def receive_messages(sock):
-    global running
+def msg_receiver(connection):
+    """Thread that listens for server messages"""
+    global client_active
     try:
-        while running:
-            result = receive_packet(sock)
-            if not result:
-                if running:
-                    print("\n[INFO] Server connection closed or game ended.")
-                running = False
+        while client_active:
+            data = receive_packet(connection)
+            if not data:
+                if client_active:
+                    print("\n[INFO] Lost connection to server.")
+                client_active = False
                 break
-            seq, pkt_type, payload = result
-            message = payload.decode().strip()
-            if message:
-                print(colorize_message(message))
+
+            # extract the message
+            seq_num, msg_type, raw_data = data
+            text = raw_data.decode().strip()
+
+            # print if not empty
+            if text:
+                print(pretty_print(text))
     except (socket.error, BrokenPipeError, ConnectionResetError) as e:
-        if running:
-            print(f"\n[INFO] Network error receiving messages: {e}. Disconnecting.")
-        running = False
+        # network went boom
+        if client_active:
+            print(f"\n[INFO] Connection error: {e}. Disconnecting.")
+        client_active = False
     except Exception as e:
-        if running:
-            print(f"\n[INFO] Unexpected error receiving messages: {e}. Disconnecting.")
-        running = False
+        # something else broke
+        if client_active:
+            print(f"\n[INFO] Weird error in message thread: {e}")
+        client_active = False
     finally:
-        if running:
-            running = False
-        print("[INFO] Message receiver thread has stopped.")
+        if client_active:
+            client_active = False
+        print("[INFO] Message thread stopped.")
 
 
 def main():
-    global running
+    global client_active
     sock = None
 
     try:
-        print(f"[INFO] Attempting to connect to server at {HOST}:{PORT}...")
+        # Connect to game server
+        print(f"[INFO] Connecting to {SERVER_ADDR}:{SERVER_PORT}...")
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(10)
-        sock.connect((HOST, PORT))
-        sock.settimeout(None)
-        print("[INFO] Connected to server.")
+        sock.settimeout(10)  # don't hang forever
+        sock.connect((SERVER_ADDR, SERVER_PORT))
+        sock.settimeout(None)  # back to normal mode
+        print("[INFO] Connected!")
 
-        # --- Packet-based username handshake ---
-        result = receive_packet(sock)
-        if result:
-            seq, pkt_type, payload = result
+        # Login process
+        got_packet = receive_packet(sock)
+        if got_packet:
+            seq, pkt_type, payload = got_packet
             if pkt_type == SYSTEM_MESSAGE:
+                # Show login prompt and send username
                 print(payload.decode())
-                username = input("Enter username: ").strip()
-                packet = pack_packet(1, USER_INPUT, username.encode())
-                sock.sendall(packet)
+                name = input("Enter username: ").strip()
+                login_packet = pack_packet(1, USER_INPUT, name.encode())
+                sock.sendall(login_packet)
             else:
-                print("[ERROR] Did not receive SYSTEM_MESSAGE for username prompt.")
+                print("[ERROR] Server didn't send login prompt. Weird.")
                 return
         else:
-            print("[ERROR] No packet received for username prompt.")
+            print("[ERROR] No response from server for login.")
             return
-        # ---------------------------------------
 
-        # Start the message receiver thread
-        receiver = threading.Thread(target=receive_messages, args=(sock,), daemon=True)
-        receiver.start()
+        # Start listening thread
+        msg_thread = threading.Thread(target=msg_receiver, args=(sock,), daemon=True)
+        msg_thread.start()
 
-        print("[INFO] Waiting for welcome message and instructions from server...")
+        print("[INFO] Waiting for server welcome message...")
 
         # Main input loop
-        while running:
+        while client_active:
             try:
-                user_input = input("")
+                text = input("")  # Get user input
             except EOFError:
-                print("\n[INFO] EOF detected on input (e.g., Ctrl+D). Exiting.")
-                running = False
+                print("\n[INFO] Input stream closed (Ctrl+D). Quitting.")
+                client_active = False
                 break
             except KeyboardInterrupt:
-                print("\n[INFO] Ctrl+C detected. Type '/quit' to exit gracefully or press Ctrl+C again to force quit.")
+                print("\n[INFO] Interrupted! Type '/quit' to exit properly or press Ctrl+C again to force quit.")
                 continue
 
-            if not running:
+            # Check if we should still be running
+            if not client_active:
                 break
 
+            # Send message to server
             try:
-                packet = pack_packet(2, USER_INPUT, user_input.encode())
-                sock.sendall(packet)
+                # always use seq 2 for now
+                pkt = pack_packet(2, USER_INPUT, text.encode())
+                sock.sendall(pkt)
             except (socket.error, BrokenPipeError, ConnectionResetError) as e:
-                if running:
-                    print(f"\n[ERROR] Failed to send message: {e}.")
-                running = False
+                if client_active:
+                    print(f"\n[ERROR] Can't send message: {e}")
+                client_active = False
                 break
             except Exception as e:
-                if running:
-                    print(f"\n[ERROR] An unexpected error occurred while sending: {e}")
-                running = False
+                if client_active:
+                    print(f"\n[ERROR] Something broke while sending: {e}")
+                client_active = False
                 break
 
-            if user_input.lower() == "/quit":
-                print("[INFO] Sent '/quit' to server. Waiting for server confirmation...")
+            # Handle quit command
+            if text.lower() == "/quit":
+                print("[INFO] Quitting game. Waiting for server to acknowledge...")
                 break
 
-        if receiver.is_alive():
-            print("[INFO] Waiting for receiver thread to finish...")
-            receiver.join(timeout=2)
+        # Clean up the message thread
+        if msg_thread.is_alive():
+            print("[INFO] Waiting for message thread...")
+            msg_thread.join(timeout=2)  # wait up to 2 sec
 
     except ConnectionRefusedError:
-        print(f"[ERROR] Connection refused. Ensure the server is running at {HOST}:{PORT}.")
+        print(f"[ERROR] Server refused connection. Is it running at {SERVER_ADDR}:{SERVER_PORT}?")
     except socket.timeout:
-        print(f"[ERROR] Connection timed out after {sock.gettimeout()} seconds.")
+        print(f"[ERROR] Connection attempt timed out after {sock.gettimeout()} seconds.")
     except KeyboardInterrupt:
-        print("\n[INFO] Ctrl+C detected during startup. Exiting client...")
+        print("\n[INFO] Startup interrupted. Exiting...")
     except Exception as e:
-        print(f"\n[ERROR] An unexpected client error occurred: {e}")
+        print(f"\n[ERROR] Something unexpected happened: {e}")
     finally:
-        if running:
-            running = False
-        print("\n[INFO] Client is shutting down.")
+        # Final cleanup
+        if client_active:
+            client_active = False
+        print("\n[INFO] Shutting down client...")
         if sock:
             try:
                 sock.close()
             except:
-                pass
-        print("[INFO] Client has exited.")
+                pass  # meh, we're quitting anyway
+        print("[INFO] Goodbye!")
 
 
+# Run the main function
 if __name__ == "__main__":
+    # Could add arg parsing here later
     main()
