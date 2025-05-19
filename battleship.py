@@ -26,7 +26,7 @@ SHIPS = [
 ]
 
 # TODO: make this configurable from settings file
-INACTIVITY_TIMEOUT = 500  # seconds before we skip a player's turn
+INACTIVITY_TIMEOUT = 60  # seconds before we skip a player's turn
 
 
 class PlayerDisconnectedException(Exception):
